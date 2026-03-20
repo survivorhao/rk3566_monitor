@@ -14,7 +14,13 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 # 指定头文件搜索路径
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+include_directories(
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    # 找到 xf86drm.h
+    /home/book/tspi_sdk/external/camera_engine_rkaiq/tests/rkisp_demo/demo/include
+    # 找到 drm.h 和 drm_fourcc.h
+    /home/book/tspi_sdk/external/camera_engine_rkaiq/tests/rkisp_demo/demo/include/libdrm
+)
 
 # 指定动态库搜索路径
 link_directories(${CMAKE_CURRENT_SOURCE_DIR}/lib)
@@ -29,12 +35,12 @@ add_executable(${PROJECT_NAME} ${SRC_FILES})
 target_link_libraries(${PROJECT_NAME}
     rknnrt
     rga
+    turbojpeg
+    drm        # 现在它能在你的 lib/ 目录下找到 libdrm.so 了
+    m          # <--- 【新增】链接标准数学库 (解决 sin/cos 报错)
     pthread
     dl
-    turbojpeg
 )
-
-
 # 告诉链接器：在生成的可执行文件中写入 RPATH
 # 让它在运行时，优先去自己同级目录下的 lib 文件夹找 .so 动态库
 set_target_properties(${PROJECT_NAME} PROPERTIES LINK_FLAGS "-Wl,-rpath=$ORIGIN/lib")
