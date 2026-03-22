@@ -8,6 +8,8 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <linux/videodev2.h>
+#include <sys/time.h>
+
 
 // === DRM KMS 现代显示框架 ===
 #include <xf86drm.h>
@@ -52,13 +54,75 @@ uint64_t fb_size = 0;
 drmModeCrtc *saved_crtc = NULL;
 int screen_dma_fd = -1; // 显存的物理内存 FD
 
+
+
+// ==========================================
+// 【新增】：极致零拷贝的 DMA 内存结构体与分配器
+// ==========================================
+struct DmaBuffer {
+    void* virt_addr; // CPU 画框用的虚拟地址
+    uint64_t size;   // 内存大小
+    uint32_t handle; // DRM 内部句柄
+    int dma_fd;      // 喂给 RGA 的终极物理通行证
+};
+
+// 核心工具：向显卡驱动“白嫖”一块物理连续、无 Cache 污染的内存
+int alloc_drm_dma_buffer(int drm_fd, uint32_t width, uint32_t height, uint32_t bpp, DmaBuffer* buf) {
+    struct drm_mode_create_dumb create = {0};
+    create.width = width;
+    create.height = height;
+    create.bpp = bpp; // 比如 RGB888 算作 24，但为对齐通常传 24 或 32
+    if (drmIoctl(drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &create) < 0) {
+        perror("分配 DMA 内存失败");
+        return -1;
+    }
+
+    buf->size = create.size;
+    buf->handle = create.handle;
+
+    struct drm_mode_map_dumb map = {0};
+    map.handle = buf->handle;
+    if (drmIoctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &map) < 0) {
+        perror("获取 DMA 映射偏移量失败");
+        return -1;
+    }
+
+    // 映射给 CPU 画框用
+    buf->virt_addr = mmap(NULL, buf->size, PROT_READ | PROT_WRITE, MAP_SHARED, drm_fd, map.offset);
+    if (buf->virt_addr == MAP_FAILED) {
+        perror("DMA 内存 mmap 失败");
+        return -1;
+    }
+
+    // 导出给 RGA 硬件加速用
+    if (drmPrimeHandleToFD(drm_fd, buf->handle, DRM_CLOEXEC, &buf->dma_fd) < 0) {
+        perror("导出 DMA_FD 失败");
+        return -1;
+    }
+
+    memset(buf->virt_addr, 0, buf->size); // 清空脏数据
+    return 0;
+}
+
+// 清理工具
+void free_drm_dma_buffer(int drm_fd, DmaBuffer* buf) {
+    if (buf->dma_fd > 0) close(buf->dma_fd);
+    if (buf->virt_addr && buf->virt_addr != MAP_FAILED) munmap(buf->virt_addr, buf->size);
+    if (buf->handle > 0) {
+        struct drm_mode_destroy_dumb destroy = {0};
+        destroy.handle = buf->handle;
+        drmIoctl(drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+    }
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) { 
         printf("用法: %s <yolov5.rknn>\n", argv[0]); 
         return -1; 
     }
-
+    init_post_process();
+    
     // ==========================================
     // 1. 初始化 YOLOv5 大脑
     // ==========================================
@@ -103,9 +167,12 @@ int main(int argc, char **argv)
     map.handle = gem_handle;
     drmIoctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &map);
     fb_ptr = mmap(NULL, fb_size, PROT_READ | PROT_WRITE, MAP_SHARED, drm_fd, map.offset);
+    
+    //fb_ptr指向frame buffer 
     memset(fb_ptr, 0, fb_size); 
 
     drmModeAddFB(drm_fd, SCREEN_WIDTH, SCREEN_HEIGHT, 24, 32, pitch, gem_handle, &fb_id);
+    
     drmModeSetCrtc(drm_fd, crtc_id, fb_id, 0, 0, &conn->connector_id, 1, &conn->modes[0]);
     
     // 将 DRM 的显存句柄，导出为 RGA 最喜欢的 DMA FD
@@ -174,26 +241,49 @@ int main(int argc, char **argv)
     // ==========================================
     // 4. 中转内存池 (给 CPU 画框用)
     // ==========================================
-    void* model_rgb_buf = malloc(MODEL_WIDTH * MODEL_HEIGHT * 3);  
-    void* canvas_rgb_buf = malloc(CAM_WIDTH * CAM_HEIGHT * 3);     
+    DmaBuffer model_dma = {0};
+    DmaBuffer canvas_dma = {0};
 
+    // 为 YOLOv5 模型分配 640x640 RGB888 (bpp=24) 的连续物理内存
+    if (alloc_drm_dma_buffer(drm_fd, MODEL_WIDTH, MODEL_HEIGHT, 24, &model_dma) < 0) return -1;
+    
+    // 为 1280x720 的高清画布分配 RGB888 的连续物理内存
+    if (alloc_drm_dma_buffer(drm_fd, CAM_WIDTH, CAM_HEIGHT, 24, &canvas_dma) < 0) return -1;
+    
+    printf("[4] DMA 中转内存池分配成功！模型 FD: %d, 画布 FD: %d\n", model_dma.dma_fd, canvas_dma.dma_fd);
+
+// 【核心修复】：彻底清空栈内存的垃圾值！
     image_buffer_t rknn_img;
+    memset(&rknn_img, 0, sizeof(image_buffer_t)); 
     rknn_img.width = MODEL_WIDTH;
     rknn_img.height = MODEL_HEIGHT;
+    rknn_img.width_stride = MODEL_WIDTH;   // 补齐官方要求的跨距
+    rknn_img.height_stride = MODEL_HEIGHT; // 补齐官方要求的跨距
     rknn_img.format = IMAGE_FORMAT_RGB888;
-    rknn_img.virt_addr = (unsigned char*)model_rgb_buf;
+    rknn_img.virt_addr = (unsigned char*)model_dma.virt_addr; 
+    rknn_img.fd = model_dma.dma_fd;        // 【核心升华】：把真正的 DMA FD 交给官方库！
 
+    // 【核心修复】：彻底清空画布的垃圾值！
     image_buffer_t canvas_img;
+    memset(&canvas_img, 0, sizeof(image_buffer_t));
     canvas_img.width = CAM_WIDTH;
     canvas_img.height = CAM_HEIGHT;
+    canvas_img.width_stride = CAM_WIDTH;
+    canvas_img.height_stride = CAM_HEIGHT;
     canvas_img.format = IMAGE_FORMAT_RGB888;
-    canvas_img.virt_addr = (unsigned char*)canvas_rgb_buf;
+    canvas_img.virt_addr = (unsigned char*)canvas_dma.virt_addr; 
+    canvas_img.fd = canvas_dma.dma_fd;     // 【核心升华】
 
     // ==========================================
     // 5. 终极主循环 (极速 dma_fd 直通模式)
     // ==========================================
     printf("--- 开始 AI 视觉推理循环 (极速 dma_fd 直通模式) ---\n");
-    
+    // 【新增】：FPS 监测变量
+    struct timeval start_time, end_time;
+    int frame_count = 0;
+    gettimeofday(&start_time, NULL);
+
+
     for (int frame = 0; frame < 500; ++frame) {
         struct v4l2_plane planes[1];
         memset(planes, 0, sizeof(planes));
@@ -206,20 +296,25 @@ int main(int argc, char **argv)
 
         if (ioctl(cam_fd, VIDIOC_DQBUF, &buf) < 0) break;
 
-        // 【RGA 处理 1】：喂给模型的缩放
+        // 【RGA 处理 1】：喂给模型的缩放 (源和目的全都是 dma_fd！)
         rga_buffer_t rga_cam_nv12 = wrapbuffer_fd(buffers[buf.index].dma_fd, CAM_WIDTH, CAM_HEIGHT, RK_FORMAT_YCbCr_420_SP);
-        rga_buffer_t rga_model_rgb = wrapbuffer_virtualaddr(model_rgb_buf, MODEL_WIDTH, MODEL_HEIGHT, RK_FORMAT_RGB_888);
+        
+        // 核心修改：模型缓冲也用 dma_fd！
+        rga_buffer_t rga_model_rgb = wrapbuffer_fd(model_dma.dma_fd, MODEL_WIDTH, MODEL_HEIGHT, RK_FORMAT_RGB_888);
         imresize(rga_cam_nv12, rga_model_rgb); 
 
         // 【AI 推理】
         object_detect_result_list od_results;
         inference_yolov5_model(&rknn_app_ctx, &rknn_img, &od_results);
 
-        // 【RGA 处理 2】：生成画布并用 CPU 画框
-        rga_buffer_t rga_canvas_rgb = wrapbuffer_virtualaddr(canvas_rgb_buf, CAM_WIDTH, CAM_HEIGHT, RK_FORMAT_RGB_888);
+        // 【RGA 处理 2】：生成画布
+        // 核心修改：画布缓冲也用 dma_fd！
+        rga_buffer_t rga_canvas_rgb = wrapbuffer_fd(canvas_dma.dma_fd, CAM_WIDTH, CAM_HEIGHT, RK_FORMAT_RGB_888);
         imcopy(rga_cam_nv12, rga_canvas_rgb);
+
+
         
-char text[256]; // 用于存放组合好的文字标签
+        char text[256]; // 用于存放组合好的文字标签
         for (int i = 0; i < od_results.count; i++) {
             object_detect_result* det = &od_results.results[i];
             
@@ -251,9 +346,30 @@ char text[256]; // 用于存放组合好的文字标签
         rga_buffer_t dst_fb = wrapbuffer_fd(screen_dma_fd, SCREEN_WIDTH, SCREEN_HEIGHT, fb_format);
         
         // RGA 旋转并直接操作 DRM 显存的物理地址 (零拷贝刷屏)
-        imrotate(rga_canvas_rgb, dst_fb, IM_HAL_TRANSFORM_ROT_90);
+        // 将在画布中画的图像，通过rga实际写入到drm的显存中，即可实现刷新效果
+        IM_STATUS status = imrotate(rga_canvas_rgb, dst_fb, IM_HAL_TRANSFORM_ROT_90);
 
+        // 【新增】：如果 RGA 罢工，立刻在终端大声报警！
+        if (status != IM_STATUS_SUCCESS) {
+            printf("RGA 旋转失败! 错误码: %s\n", imStrError(status));
+        }
         ioctl(cam_fd, VIDIOC_QBUF, &buf);
+
+        // 【新增】：每跑 30 帧，统计并打印一次平均 FPS
+        frame_count++;
+        if (frame_count % 30 == 0) {
+            gettimeofday(&end_time, NULL);
+            // 计算经过了多少秒
+            float elapsed = (end_time.tv_sec - start_time.tv_sec) + 
+                            (end_time.tv_usec - start_time.tv_usec) / 1000000.0f;
+            // 计算 FPS (30帧 / 耗时)
+            float fps = 30.0f / elapsed;
+            
+            printf("当前全链路平均 FPS: %.2f \n", fps);
+            
+            // 重置计时器，准备统计下一个 30 帧
+            gettimeofday(&start_time, NULL); 
+        }
     }
 
     // ==========================================
@@ -277,8 +393,9 @@ char text[256]; // 用于存放组合好的文字标签
     req_free.memory = V4L2_MEMORY_MMAP;
     ioctl(cam_fd, VIDIOC_REQBUFS, &req_free);
 
-    free(model_rgb_buf);
-    free(canvas_rgb_buf);
+// 释放我们自己造的 DMA 内存池
+    free_drm_dma_buffer(drm_fd, &model_dma);
+    free_drm_dma_buffer(drm_fd, &canvas_dma);
     
     if (saved_crtc) {
         drmModeSetCrtc(drm_fd, saved_crtc->crtc_id, saved_crtc->buffer_id,
