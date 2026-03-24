@@ -9,7 +9,7 @@
 #include <sys/mman.h>
 #include <linux/videodev2.h>
 #include <sys/time.h>
-
+#include <mosquitto.h> // 【新增】MQTT 头文件
 
 // === DRM KMS 现代显示框架 ===
 #include <xf86drm.h>
@@ -34,6 +34,50 @@
 
 #define SCREEN_WIDTH  480
 #define SCREEN_HEIGHT 800
+
+#include <mosquitto.h> // 【新增】MQTT 头文件
+
+
+//====================================================================
+
+// ==========================================
+// 【新增】：MQTT 配置参数
+// ==========================================
+// === MQTT 配置参数 ===
+#define MQTT_HOST       "z9c1fa31.ala.cn-hangzhou.emqxsl.cn"
+#define MQTT_PORT       8883
+#define MQTT_USER       "rk3566dev"
+#define MQTT_PWD        "2cpvhZLTX8UfX4R"
+#define CA_CERT_PATH    "./emqxsl-ca.crt"  // CA证书路径
+#define MQTT_TOPIC      "rk3566/test_topic"
+
+// 连接成功后的回调函数
+void on_connect(struct mosquitto *mosq, void *obj, int rc) {
+    if (rc == 0) {
+        printf("[SUCCESS] 成功通过 TLS 连接到 EMQX Serverless Broker!\n");
+        
+        // 1. 订阅测试主题
+        mosquitto_subscribe(mosq, NULL, MQTT_TOPIC, 1);
+        printf("[INFO] 已发送订阅请求: %s\n", MQTT_TOPIC);
+        
+        // 2. 发布一条测试消息
+        const char *msg = "Hello from RK3566 Standalone MQTT Test!";
+        mosquitto_publish(mosq, NULL, MQTT_TOPIC, strlen(msg), msg, 1, false);
+        printf("[INFO] 已发送测试消息: %s\n", msg);
+    } else {
+        printf("[ERROR] 连接失败，错误码: %d\n", rc);
+    }
+}
+
+// 接收到消息的回调函数
+void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_message *msg) {
+    printf("\n>>> [MQTT 接收消息] <<<\n");
+    printf("主题: %s\n", msg->topic);
+    printf("负载: %s\n", (char *)msg->payload);
+    printf("QoS:  %d\n", msg->qos);
+    printf("------------------------\n");
+}
+//====================================================================
 
 // V4L2 缓冲区结构体，带有 dma_fd
 struct CamBuffer { 
@@ -67,7 +111,8 @@ struct DmaBuffer {
 };
 
 // 核心工具：向显卡驱动“白嫖”一块物理连续、无 Cache 污染的内存
-int alloc_drm_dma_buffer(int drm_fd, uint32_t width, uint32_t height, uint32_t bpp, DmaBuffer* buf) {
+int alloc_drm_dma_buffer(int drm_fd, uint32_t width, uint32_t height, uint32_t bpp, DmaBuffer* buf) 
+{
     struct drm_mode_create_dumb create = {0};
     create.width = width;
     create.height = height;
@@ -115,7 +160,66 @@ void free_drm_dma_buffer(int drm_fd, DmaBuffer* buf) {
     }
 }
 
+
 int main(int argc, char **argv)
+{
+    struct mosquitto *mosq = NULL;
+    int rc;
+
+    // 1. 初始化 mosquitto 库
+    mosquitto_lib_init();
+
+    // 2. 创建客户端实例
+    mosq = mosquitto_new("rk3566_standalone_test", true, NULL);
+    if (!mosq) {
+        fprintf(stderr, "[ERROR] 无法创建 mosquitto 实例\n");
+        return -1;
+    }
+
+    // 3. 注册回调函数
+    mosquitto_connect_callback_set(mosq, on_connect);
+    mosquitto_message_callback_set(mosq, on_message);
+
+    // 4. 配置用户名和密码
+    mosquitto_username_pw_set(mosq, MQTT_USER, MQTT_PWD);
+
+    // 5. 配置 TLS 证书 (必须在 connect 之前调用)
+    // 参数依次为：CA文件, CA目录, 客户端证书, 客户端私钥, 密码回调
+    rc = mosquitto_tls_set(mosq, CA_CERT_PATH, NULL, NULL, NULL, NULL);
+    if (rc != MOSQ_ERR_SUCCESS) {
+        fprintf(stderr, "[ERROR] TLS 证书配置失败: %s (请检查 %s 是否存在)\n", mosquitto_strerror(rc), CA_CERT_PATH);
+        mosquitto_destroy(mosq);
+        mosquitto_lib_cleanup();
+        return -1;
+    }
+
+    // 6. 连接到 Broker
+    printf("[INFO] 正在连接到 %s:%d...\n", MQTT_HOST, MQTT_PORT);
+    rc = mosquitto_connect(mosq, MQTT_HOST, MQTT_PORT, 60);
+    if (rc != MOSQ_ERR_SUCCESS) {
+        fprintf(stderr, "[ERROR] 建立连接失败: %s\n", mosquitto_strerror(rc));
+        mosquitto_destroy(mosq);
+        mosquitto_lib_cleanup();
+        return -1;
+    }
+
+    // 7. 进入阻塞式事件循环 (按 Ctrl+C 退出)
+    printf("[INFO] 进入 MQTT 事件循环，等待消息收发 (Ctrl+C 退出)...\n");
+    mosquitto_loop_forever(mosq, -1, 1);
+
+    // 8. 清理资源
+    mosquitto_destroy(mosq);
+    mosquitto_lib_cleanup();
+
+    return 0;
+
+
+
+}
+
+
+
+int fake_main(int argc, char **argv)
 {
     if (argc != 2) { 
         printf("用法: %s <yolov5.rknn>\n", argv[0]); 
