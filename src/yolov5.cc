@@ -77,6 +77,8 @@ int init_yolov5_model(const char *model_path, rknn_app_context_t *app_ctx)
             printf("rknn_query fail! ret=%d\n", ret);
             return -1;
         }
+
+        //将输入属性打印出来，方便调试和查看
         dump_tensor_attr(&(input_attrs[i]));
     }
 
@@ -93,6 +95,7 @@ int init_yolov5_model(const char *model_path, rknn_app_context_t *app_ctx)
             printf("rknn_query fail! ret=%d\n", ret);
             return -1;
         }
+        //将输出属性打印出来，方便调试和查看
         dump_tensor_attr(&(output_attrs[i]));
     }
 
@@ -129,6 +132,8 @@ int init_yolov5_model(const char *model_path, rknn_app_context_t *app_ctx)
         app_ctx->model_width = input_attrs[0].dims[2];
         app_ctx->model_channel = input_attrs[0].dims[3];
     }
+
+    //模型对于输入Image的要求 
     printf("model input height=%d, width=%d, channel=%d\n",
            app_ctx->model_height, app_ctx->model_width, app_ctx->model_channel);
 

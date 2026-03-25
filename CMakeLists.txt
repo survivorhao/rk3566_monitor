@@ -25,8 +25,8 @@ include_directories(
 # 指定动态库搜索路径
 link_directories(${CMAKE_CURRENT_SOURCE_DIR}/lib)
 
-# 收集所有的 C/C++ 源文件
-file(GLOB SRC_FILES "src/*.cpp" "src/*.cc" "src/*.c")
+# 修改后 (增加 _RECURSE 后缀)：
+file(GLOB_RECURSE SRC_FILES "src/*.cpp" "src/*.cc" "src/*.c")
 
 # 生成可执行文件
 add_executable(${PROJECT_NAME} ${SRC_FILES})
