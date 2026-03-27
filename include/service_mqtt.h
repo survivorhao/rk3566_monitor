@@ -21,6 +21,13 @@ int mqtt_report_event(int target_count, float temp, float humi, int co2, int tvo
 // 4. 清理并断开连接
 void mqtt_cleanup(void);
 
+// 定义云端指令回调函数的函数指针类型
+typedef void (*mqtt_cmd_cb_t)(const char* cmd, float val);
+
+// 注册指令回调函数
+void mqtt_set_cmd_callback(mqtt_cmd_cb_t cb);
+
+
 #ifdef __cplusplus
 }
 #endif

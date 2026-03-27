@@ -48,7 +48,8 @@ static void ensure_dir_exists(const char *dir_path) {
 }
 
 // 消费者 Worker 线程
-static void* storage_worker_thread(void* arg) {
+static void* storage_worker_thread(void* arg) 
+{
     tjhandle tj_compressor = tjInitCompress();
     
     // 初始化时确保目录存在
@@ -173,6 +174,10 @@ int service_storage_push_task(const unsigned char *rgb_data, int width, int heig
         free(new_node);
         return -1;
     }
+
+    //拷贝drm dumb buffer中的数据，到这里的malloc分配的buffer中
+    //后续仅仅做image压缩到jpeg操作因此对于存放image的缓冲区的特性没有什么要求
+    //例如物理内存是否连续，是否支持dma
     memcpy(new_node->rgb_data, rgb_data, rgb_size);
 
     new_node->width = width;

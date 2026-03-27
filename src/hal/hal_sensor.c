@@ -9,6 +9,10 @@
 #include <errno.h>
 #include <sys/time.h>
 
+
+// 默认看门狗时长为 10000 毫秒
+static int g_watchdog_ms = 10000; 
+
 // 内部隐藏的全局状态与锁
 static struct {
     int co2;
@@ -27,6 +31,19 @@ static uint64_t get_current_time_ms() {
     gettimeofday(&tv, NULL);
     return tv.tv_sec * 1000 + tv.tv_usec / 1000;
 }
+
+
+void hal_sensor_set_watchdog_duration(int ms) {
+    pthread_mutex_lock(&g_state_mutex);
+    g_watchdog_ms = ms;
+    pthread_mutex_unlock(&g_state_mutex);
+}
+
+int hal_sensor_get_watchdog_duration(void) {
+    return g_watchdog_ms;
+}
+
+
 
 // 读取 sysfs 整数值
 static int read_sysfs_int(const char *path) {
@@ -58,7 +75,8 @@ static void* sensor_thread_func(void* arg)
 
     printf("[HAL Sensor] 硬件传感器事件监听引擎已启动...\n");
 
-    while (1) {
+    while (1) 
+    {
         int nfds = epoll_wait(epfd, events, MAX_EPOLL_EVENTS, -1);
         if (nfds < 0) { if (errno == EINTR) continue; break; }
 
@@ -69,9 +87,9 @@ static void* sensor_thread_func(void* arg)
                 if (read(sr501_fd, buf, sizeof(buf)) > 0) {
                     pthread_mutex_lock(&g_state_mutex);
                     g_sensor_state.is_ai_active = true;
-                    g_sensor_state.ai_timeout_ms = get_current_time_ms() + 10000;
+                    g_sensor_state.ai_timeout_ms = get_current_time_ms() + g_watchdog_ms;
                     pthread_mutex_unlock(&g_state_mutex);
-                    printf("\n [HAL Sensor] 🚨 SR501 硬件中断触发，唤醒 AI 引擎 10 秒！\n");
+                    printf("\n [HAL Sensor] SR501 硬件中断触发，唤醒 AI 引擎 %d 秒！\n",g_watchdog_ms);
                 }
             }
             // --- SGP30 1Hz 轮询触发 ---

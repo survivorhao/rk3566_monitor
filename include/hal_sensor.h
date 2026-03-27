@@ -26,6 +26,12 @@ current_sensor_state_t hal_sensor_get_state(void);
 // 3. AI 视觉引擎调用：发现人体后，重置看门狗倒计时（例如传入 10000 毫秒）
 void hal_sensor_keep_ai_alive(int duration_ms);
 
+// 动态修改 AI 激活看门狗时长（毫秒）
+void hal_sensor_set_watchdog_duration(int ms);
+// 获取当前看门狗时长（毫秒）
+int hal_sensor_get_watchdog_duration(void);
+
+
 #ifdef __cplusplus
 }
 #endif

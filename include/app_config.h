@@ -33,6 +33,7 @@
 #define MQTT_PWD        "2cpvhZLTX8UfX4R"
 #define CA_CERT_PATH    "./emqxsl-ca.crt"
 #define MQTT_TOPIC      "rk3566/ai_events"
+#define MQTT_CMD_TOPIC  "rk3566/cmd"  
 
 
 
@@ -45,3 +46,4 @@
 #define SAVE_CSV_PATH "/media/sdcard0/camera_log/events_log.csv"
 
 #endif // APP_CONFIG_H
+
