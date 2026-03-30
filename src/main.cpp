@@ -46,7 +46,8 @@ void cloud_cmd_handler(const char* cmd, float val) {
     }
 }
 
-void sig_handler(int signo) {
+void sig_handler(int signo) 
+{
     if (signo == SIGINT || signo == SIGTERM) {
         printf("\n[Main] 接收到退出信号 (Signo: %d)，准备优雅退出主循环...\n", signo);
         g_quit_flag = 1;
@@ -69,7 +70,7 @@ int main(int argc, char **argv)
     if (hal_display_init() < 0) return -1;
     if (hal_camera_init() < 0) return -1;
 
-    int screen_dma_fd = hal_display_get_screen_fd();
+    // 【删除】：不再在此处获取静态的 screen_dma_fd
 
     init_post_process();
     rknn_app_context_t rknn_app_ctx;
@@ -89,7 +90,7 @@ int main(int argc, char **argv)
     canvas_img.width = CAM_WIDTH; canvas_img.height = CAM_HEIGHT; canvas_img.width_stride = CAM_WIDTH; canvas_img.height_stride = CAM_HEIGHT;
     canvas_img.format = IMAGE_FORMAT_RGB888; canvas_img.virt_addr = (unsigned char*)canvas_dma.virt_addr; canvas_img.fd = canvas_dma.dma_fd;
 
-    printf("--- 开始 AI 视觉推理循环 (已接入云端反向控制) ---\n");
+    printf("--- 开始 AI 视觉推理循环 (已接入云端反向控制与双缓冲防撕裂) ---\n");
     struct timeval last_publish_time = {0}; 
 
     while (!g_quit_flag) {
@@ -138,7 +139,7 @@ int main(int argc, char **argv)
 
                     sprintf(text, "Person %.1f%%", det->prop * 100); 
                     int text_y = (y1 - 20 < 10) ? (y1 + 10) : (y1 - 20); 
-                    draw_text(&canvas_img, text, x1, text_y, 0xFFFF0000, 10); 
+                    draw_text(&canvas_img, text, x1, text_y, 0xFFFF0000, 15); 
                 }
             }
 
@@ -174,10 +175,22 @@ int main(int argc, char **argv)
             }
         }
 
+        // ================================================================
+        // 【核心修改】：应用 DRM 双缓冲防撕裂逻辑
+        // ================================================================
         int fb_format = RK_FORMAT_BGRA_8888;
-        rga_buffer_t dst_fb = wrapbuffer_fd(screen_dma_fd, SCREEN_WIDTH, SCREEN_HEIGHT, fb_format);
+        
+        // 1. 动态获取当前的 Back Buffer (后台画布)
+        int back_screen_fd = hal_display_get_back_buffer_fd();
+        rga_buffer_t dst_fb = wrapbuffer_fd(back_screen_fd, SCREEN_WIDTH, SCREEN_HEIGHT, fb_format);
+        
+        // 2. RGA 偷偷在后台画布上疯狂画图 (旋转并缩放输出到屏幕分辨率)
         imrotate(rga_canvas_rgb, dst_fb, IM_HAL_TRANSFORM_ROT_90);
 
+        // 3. 提交 DRM 翻页，并挂起等待 VSync (垂直同步) 信号！
+        hal_display_commit_and_wait();
+
+        // 4. 用完归还 V4L2 缓冲
         hal_camera_put_frame(cam_buf_index);
     }
 

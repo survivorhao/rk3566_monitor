@@ -7,7 +7,6 @@
 extern "C" {
 #endif
 
-// 我们自己造的 DMA 内存池对象
 typedef struct {
     void* virt_addr;
     uint64_t size;
@@ -15,19 +14,16 @@ typedef struct {
     int dma_fd;
 } hal_drm_buf_t;
 
-// 1. 初始化 DRM 并在屏幕上生成一块画布
 int hal_display_init(void);
 
-// 2. 获取屏幕 DMA 句柄，供底层 RGA 刷屏用
-int hal_display_get_screen_fd(void);
+// 获取当前后台画布（Back Buffer）的 DMA FD，供 RGA 画图用
+int hal_display_get_back_buffer_fd(void);
 
-// 3. 在底层申请零拷贝 DMA 内存 (给模型和画布使用)
+// 提交后台画布到屏幕，并阻塞等待 VSync 垂直同步信号到来
+void hal_display_commit_and_wait(void);
+
 int hal_display_alloc_buffer(uint32_t width, uint32_t height, uint32_t bpp, hal_drm_buf_t* buf);
-
-// 4. 释放 DMA 内存
 void hal_display_free_buffer(hal_drm_buf_t* buf);
-
-// 5. 销毁屏幕
 void hal_display_deinit(void);
 
 #ifdef __cplusplus

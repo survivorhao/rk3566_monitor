@@ -34,12 +34,15 @@ void mqtt_set_cmd_callback(mqtt_cmd_cb_t cb) {
 
 // MQTT 连接成功回调（增加订阅）
 static void on_connect(struct mosquitto *mosq, void *obj, int rc) {
-    if (rc == 0) {
+    if (rc == 0) 
+    {
         printf("[MQTT Service] 成功通过 TLS 连接到 EMQX Broker!\n");
         g_mqtt_connected = true;
         // 连上后立即订阅 CMD 主题 (QoS 1)
         mosquitto_subscribe(mosq, NULL, MQTT_CMD_TOPIC, 1);
-    } else {
+    } 
+    else 
+    {
         printf("[MQTT Service] 连接失败，错误码: %d\n", rc);
         g_mqtt_connected = false;
     }
