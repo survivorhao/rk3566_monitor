@@ -12,7 +12,16 @@ static bool g_mqtt_connected = false;
 
 
 
-// MQTT 断开回调
+/**
+ * @brief This is called when the broker has received the
+ *        DISCONNECT command and has disconnected the client
+ * 
+ * @param mosq  the mosquitto instance making the callback.
+ * @param obj   the user data provided in <mosquitto_new>
+ * @param rc    integer value indicating the reason for the disconnect. A value of 0
+ *         means the client has called <mosquitto_disconnect>. Any other value
+ *         indicates that the disconnect is unexpected.
+ */
 static void on_disconnect(struct mosquitto *mosq, void *obj, int rc) {
     printf("[MQTT Service] 警告：与服务器的连接已断开 (原因码: %d)！等待重连...\n", rc);
     g_mqtt_connected = false;
@@ -28,17 +37,25 @@ bool is_mqtt_connected(void)
 
 static mqtt_cmd_cb_t g_cmd_cb = NULL;
 
+
 void mqtt_set_cmd_callback(mqtt_cmd_cb_t cb) {
     g_cmd_cb = cb;
 }
 
-// MQTT 连接成功回调（增加订阅）
+/**
+ * @brief 注册的mqtt connect call back function
+ * 
+ * @param mosq mqtt client instance
+ * @param obj user pass argument
+ * @param rc return code 
+ */
 static void on_connect(struct mosquitto *mosq, void *obj, int rc) {
     if (rc == 0) 
     {
         printf("[MQTT Service] 成功通过 TLS 连接到 EMQX Broker!\n");
         g_mqtt_connected = true;
-        // 连上后立即订阅 CMD 主题 (QoS 1)
+
+        // 连上后立即订阅 CMD 主题 (QoS 1),实现反向控制
         mosquitto_subscribe(mosq, NULL, MQTT_CMD_TOPIC, 1);
     } 
     else 
@@ -48,7 +65,16 @@ static void on_connect(struct mosquitto *mosq, void *obj, int rc) {
     }
 }
 
-// 处理云端下发的 JSON 消息
+/**
+ * @brief This is called when a message is received from the
+ *        broker and the required QoS flow has completed.
+ * 
+ * @param mosq mqtt client instance
+ * @param obj user pass argument
+ * @param msg the message data. This variable and associated memory will be
+ *            freed by the library after the callback completes. The client
+ *            should make copies of any of the data it requires.
+ */
 static void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_message *msg) {
     if (!msg->payload || !g_cmd_cb) return;
     char *payload = (char*)msg->payload;
@@ -67,12 +93,25 @@ static void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto
     else if (strstr(payload, "\"set_threshold\"")) g_cmd_cb("set_threshold", val);
     else if (strstr(payload, "\"snapshot\"")) g_cmd_cb("snapshot", 0);
     else if (strstr(payload, "\"clear_storage\"")) g_cmd_cb("clear_storage", 0);
+
+
 }
 
 
 
 
-
+/**
+ * @brief 向指定的top上传数据
+ * 
+ * @param target_count 检测到几个目标（也就是检测到几个人）
+ * @param temp 温度数据
+ * @param humi 湿度数据
+ * @param co2 二氧化碳浓度
+ * @param tvoc 挥发性有机化合物
+ * @param jpeg_buf jpeg格式图片数据
+ * @param jpeg_size  大小
+ * @return int return 0 on success
+ */
 int mqtt_report_event(int target_count, float temp, float humi, int co2, int tvoc, 
                       const unsigned char *jpeg_buf, unsigned long jpeg_size) {
     
@@ -83,6 +122,7 @@ int mqtt_report_event(int target_count, float temp, float humi, int co2, int tvo
     char *b64_buf = (char *)malloc(b64_max_len);
     if (!b64_buf) return -1;
     
+    //对原始jepg图像数据进行base64编码
     int b64_len = EVP_EncodeBlock((unsigned char *)b64_buf, jpeg_buf, jpeg_size);
 
     // 2. 组装 JSON
@@ -115,11 +155,18 @@ int mqtt_report_event(int target_count, float temp, float humi, int co2, int tvo
     return (pub_ret == MOSQ_ERR_SUCCESS) ? 0 : -1;
 }
 
-
+/**
+ * @brief 初始化mqtt client
+ * 
+ * @return int reuturn 0 on success
+ */
 int mqtt_init(void) 
 {
+    //init mosquitto lib
     mosquitto_lib_init();
-    mqtt_client = mosquitto_new("rk3566_ai_terminal", true, NULL);
+
+
+    mqtt_client = mosquitto_new(MQTT_CLIENT_NAME, true, NULL);
     if (!mqtt_client) return -1;
 
     mosquitto_connect_callback_set(mqtt_client, on_connect);
@@ -136,8 +183,10 @@ int mqtt_init(void)
     // 注册这个 message 回调
     mosquitto_message_callback_set(mqtt_client, on_message);
 
-
+    //async connect mqtt broker
     mosquitto_connect_async(mqtt_client, MQTT_HOST, MQTT_PORT, 60);
+    
+    //start a new thread to process network traffic
     mosquitto_loop_start(mqtt_client);
     
     return 0;
@@ -145,7 +194,10 @@ int mqtt_init(void)
 
 
 
-
+/**
+ * @brief free resources
+ * 
+ */
 void mqtt_cleanup(void) {
     if (mqtt_client) {
         mosquitto_disconnect(mqtt_client);

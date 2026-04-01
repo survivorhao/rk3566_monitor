@@ -47,7 +47,7 @@ int  g_trigger_person_count = 0;
 // 传递给 AI 线程的参数结构体
 struct AI_Thread_Args {
     rknn_app_context_t* ctx;
-    image_buffer_t* img;
+    image_buffer_t* img;        //要推理的图像数据
 };
 
 // ================================================================
@@ -102,7 +102,13 @@ void* ai_worker_thread(void* arg) {
     return NULL;
 }
 
-// 云端指令分发中心
+/**
+ * @brief 云端 MQTT 指令处理回调函数，支持动态调整 AI 参数和触发强制抓拍
+ *        实现对于设备的反向控制
+ * 
+ * @param cmd 命令字符串，目前支持： "set_timeout", "set_threshold", "snapshot", "clear_storage"
+ * @param val 命令的参数，有些命令不需要参数，直接忽略即可
+ */
 void cloud_cmd_handler(const char* cmd, float val) {
     if (strcmp(cmd, "set_timeout") == 0) {
         hal_sensor_set_watchdog_duration((int)(val * 1000));
@@ -143,14 +149,17 @@ int main(int argc, char **argv)
     if (hal_display_init() < 0) return -1;
     if (hal_camera_init() < 0) return -1;
 
-    init_post_process();
     rknn_app_context_t rknn_app_ctx;
     memset(&rknn_app_ctx, 0, sizeof(rknn_app_context_t));
     if (init_yolov5_model(argv[1], &rknn_app_ctx) != 0) return -1;
 
     hal_drm_buf_t model_dma = {0}; 
     hal_drm_buf_t canvas_dma = {0};
+    
+    //分配yolov5推理输入的图片数据缓冲区
     hal_display_alloc_buffer(MODEL_WIDTH, MODEL_HEIGHT, 24, &model_dma);
+    
+    //分配供cpu画框用的canvas缓冲区
     hal_display_alloc_buffer(CAM_WIDTH, CAM_HEIGHT, 24, &canvas_dma);
     
     image_buffer_t rknn_img = {0};
@@ -161,7 +170,7 @@ int main(int argc, char **argv)
     canvas_img.width = CAM_WIDTH; canvas_img.height = CAM_HEIGHT; canvas_img.width_stride = CAM_WIDTH; canvas_img.height_stride = CAM_HEIGHT;
     canvas_img.format = IMAGE_FORMAT_RGB888; canvas_img.virt_addr = (unsigned char*)canvas_dma.virt_addr; canvas_img.fd = canvas_dma.dma_fd;
 
-    // 【新增】：启动 AI 后台推理线程
+    // 启动 AI 后台推理线程
     AI_Thread_Args ai_args = {&rknn_app_ctx, &rknn_img};
     pthread_t ai_tid;
     pthread_create(&ai_tid, NULL, ai_worker_thread, &ai_args);
@@ -170,24 +179,34 @@ int main(int argc, char **argv)
     struct timeval last_publish_time = {0}; 
 
     while (!g_quit_flag) {
+        
         int cam_dma_fd = -1;
         int cam_buf_index = -1;
+        
+        //获得一帧，索引以及dma file descriptor
         if (hal_camera_get_frame(&cam_dma_fd, &cam_buf_index) < 0) break;
 
         current_sensor_state_t sensor_state = hal_sensor_get_state();
+        //是否需要运行ai 推理
         bool run_ai = sensor_state.is_ai_active || g_force_snapshot;
 
         // 1. 获取画面拷贝到 Canvas
         rga_buffer_t rga_cam_nv12 = wrapbuffer_fd(cam_dma_fd, CAM_WIDTH, CAM_HEIGHT, RK_FORMAT_YCbCr_420_SP);
         rga_buffer_t rga_canvas_rgb = wrapbuffer_fd(canvas_dma.dma_fd, CAM_WIDTH, CAM_HEIGHT, RK_FORMAT_RGB_888);
+        // RGA 硬件直接从摄像头的 DMA buffer拷贝并转换格式到画框用的 Canvas，零 CPU 占用
         imcopy(rga_cam_nv12, rga_canvas_rgb); 
 
         // 2. 将画面“喂”给 AI 线程 (极速硬件缩放，零内存拷贝)
         pthread_mutex_lock(&g_ai_mutex);
+        //当ai当前没在推理的时候，
         if (!g_ai_busy && run_ai) {
             rga_buffer_t rga_model_rgb = wrapbuffer_fd(model_dma.dma_fd, MODEL_WIDTH, MODEL_HEIGHT, RK_FORMAT_RGB_888);
+            
+            //将摄像头这一帧转换为模型所需要的格式和尺寸
             imresize(rga_cam_nv12, rga_model_rgb); // RGA 硬件瞬间完成
             
+
+            //如果说client发送了强制抓拍上传的命令
             if (g_force_snapshot) {
                 g_ai_wants_snap = true;
                 g_force_snapshot = false; // 消费掉云端指令
@@ -198,7 +217,8 @@ int main(int argc, char **argv)
         }
         pthread_mutex_unlock(&g_ai_mutex);
 
-        // 3. 读取最新的 AI 计算结果（即使 AI 还在算上一帧，这里也能瞬间拿到上上次的结果）
+        // 3. 读取AI 计算结果（即使 AI 还在算上一帧，这里也能瞬间拿到上上次的结果）
+        // 注意：这里的结果是上一次 AI 线程计算的结果，可能会有一帧的延迟，但绝对不会卡顿
         pthread_mutex_lock(&g_ai_mutex);
         object_detect_result_list draw_results = g_display_results;
         bool do_snap = g_trigger_snapshot;
@@ -222,8 +242,10 @@ int main(int argc, char **argv)
             draw_text(&canvas_img, text, x1, text_y, 0xFFFF0000, 15); 
         }
 
-        // 5. 抓拍落盘逻辑
+        // 5. 强制抓拍上传
         if (do_snap) {
+
+            //检测到人了
             if (snap_count > 0) hal_sensor_keep_ai_alive(hal_sensor_get_watchdog_duration());
 
             struct timeval current_time;
@@ -231,29 +253,30 @@ int main(int argc, char **argv)
             float time_since_last_pub = (current_time.tv_sec - last_publish_time.tv_sec) + 
                                         (current_time.tv_usec - last_publish_time.tv_usec) / 1000000.0f;
 
+            //距离上次上传时间以及过了3秒，再上传，免得太过于频繁上传
             if (time_since_last_pub > 3.0f || is_force) {
                 if (service_storage_push_task((unsigned char*)canvas_img.virt_addr, CAM_WIDTH, CAM_HEIGHT, 
                                                 snap_count, sensor_state.temp, sensor_state.humi, 
                                                 sensor_state.co2, sensor_state.tvoc) == 0) {
                     last_publish_time = current_time; 
-                    if (is_force) printf("[Main] 📸 强制抓拍执行完毕，图片已异步推入云端！\n");
-                    else printf("[Main] 🚨 [EVENT] 画面中发现 %d 个人，已异步上云...\n", snap_count);
+                    if (is_force) printf("[Main] 强制抓拍执行完毕，图片已异步推入云端！\n");
+                    else printf("[Main] [EVENT] 画面中发现 %d 个人，已异步上云...\n", snap_count);
                 }
             } 
         }
 
-        // 6. OSD 数据渲染
-        sprintf(text, "AI: %s | T:%.1fC H:%.1f%% CO2:%d", run_ai ? "ACTIVE" : "SLEEP", 
-                sensor_state.temp, sensor_state.humi, sensor_state.co2);
-        draw_text(&canvas_img, text, 10, 30, run_ai ? 0xFFFF0000 : 0xFF00FF00, 2); 
-
-        // 7. RGA 刷屏 (配合 DRM 双缓冲，绝不撕裂)
+        // 6. RGA 刷屏 (配合 DRM 双缓冲，绝不撕裂)
         int fb_format = RK_FORMAT_BGRA_8888;
         int back_screen_fd = hal_display_get_back_buffer_fd();
         rga_buffer_t dst_fb = wrapbuffer_fd(back_screen_fd, SCREEN_WIDTH, SCREEN_HEIGHT, fb_format);
+        
+        //RGA转换后直接写入DRM的后台缓冲，零拷贝
         imrotate(rga_canvas_rgb, dst_fb, IM_HAL_TRANSFORM_ROT_90);
 
+        //再VBLANK时提交屏幕更新请求，显示新画面
         hal_display_commit_and_wait();
+
+        // 7. 告诉摄像头这一帧处理完了，可以复用这个buffer了
         hal_camera_put_frame(cam_buf_index);
     }
 
@@ -262,7 +285,7 @@ int main(int argc, char **argv)
     // 安全停止 AI 线程
     g_ai_thread_run = false;
     pthread_mutex_lock(&g_ai_mutex);
-    g_has_new_frame = true; // 唤醒阻塞在 wait 上的线程让其自然退出
+    g_has_new_frame = true;             // 唤醒阻塞在 wait 上的线程让其自然退出
     pthread_cond_signal(&g_ai_cond);
     pthread_mutex_unlock(&g_ai_mutex);
     pthread_join(ai_tid, NULL);

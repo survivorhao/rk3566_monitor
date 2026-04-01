@@ -34,7 +34,7 @@
 #define CA_CERT_PATH    "./emqxsl-ca.crt"
 #define MQTT_TOPIC      "rk3566/ai_events"
 #define MQTT_CMD_TOPIC  "rk3566/cmd"  
-
+#define MQTT_CLIENT_NAME "rk3566_ai_terminal"
 
 
 

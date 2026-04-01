@@ -26,14 +26,14 @@ typedef struct task_node {
     struct task_node *next;
 } task_node_t;
 
-// 阻塞队列结构体
+// 任务队列
 typedef struct {
-    task_node_t *head;
-    task_node_t *tail;
-    int count;
+    task_node_t *head;      //head pointer,取work从这里取
+    task_node_t *tail;      //tail pointer,加work从这里加
+    int count;              //有几个任务
     bool stop_flag;
     pthread_mutex_t lock;
-    pthread_cond_t cond;
+    pthread_cond_t cond;    
 } task_queue_t;
 
 static task_queue_t g_queue;
@@ -47,12 +47,18 @@ static void ensure_dir_exists(const char *dir_path) {
     }
 }
 
-// 消费者 Worker 线程
+/**
+ * @brief worker线程，负责从work queue中取出work,然后处理
+ * 
+ * @param arg NULL, unused
+ * @return void* NULL, unused
+ */
 static void* storage_worker_thread(void* arg) 
 {
+    //Create a TurboJPEG compressor instance.
     tjhandle tj_compressor = tjInitCompress();
     
-    // 初始化时确保目录存在
+    // 确保存储数据以及图像数据的目录存在
     ensure_dir_exists(SAVE_BASE_DIR);
     ensure_dir_exists(SAVE_IMG_DIR);
 
@@ -61,6 +67,7 @@ static void* storage_worker_thread(void* arg)
         task_node_t *task = NULL;
 
         pthread_mutex_lock(&g_queue.lock);
+
         // 如果队列为空且没有收到停止信号，就休眠等待
         while (g_queue.count == 0 && !g_queue.stop_flag) {
             pthread_cond_wait(&g_queue.cond, &g_queue.lock);
@@ -72,7 +79,7 @@ static void* storage_worker_thread(void* arg)
             break;
         }
 
-        // 出队
+        // 出队，取出一个任务
         task = g_queue.head;
         if (task) {
             g_queue.head = task->next;
@@ -141,6 +148,13 @@ static void* storage_worker_thread(void* arg)
     return NULL;
 }
 
+/**
+ * @brief 创建单独的线程，来将传感器以及图像数据存储到本地sd卡
+ *        采用work queue的形式，主线程只需要向这个work queue递交任务
+ *        这个线程负责在后台把数据保存到sd卡以及上传到Mqtt Broker
+ * 
+ * @return int return 0 on success
+ */
 int service_storage_init(void) {
     memset(&g_queue, 0, sizeof(g_queue));
     pthread_mutex_init(&g_queue.lock, NULL);
@@ -153,6 +167,20 @@ int service_storage_init(void) {
     return 0;
 }
 
+
+/**
+ * @brief 向work queue递交一个task
+ * 
+ * @param rgb_data  要上传的图像帧数据
+ * @param width     图像帧数据的宽度
+ * @param height    图像帧数据的高度
+ * @param target_count  检测到几个目标
+ * @param temp 温度
+ * @param humi 湿度
+ * @param co2 二氧化碳
+ * @param tvoc 总挥发性有机物
+ * @return int return 0 on success, -1 on fail
+ */
 int service_storage_push_task(const unsigned char *rgb_data, int width, int height,
                               int target_count, float temp, float humi, int co2, int tvoc) {
     
@@ -164,11 +192,15 @@ int service_storage_push_task(const unsigned char *rgb_data, int width, int heig
     }
     pthread_mutex_unlock(&g_queue.lock);
 
-    // 申请堆内存并深拷贝画面 (策略 A：主线程极速剥离)
+    // 申请堆内存并深拷贝画面
     task_node_t *new_node = (task_node_t *)malloc(sizeof(task_node_t));
     if (!new_node) return -1;
     
     int rgb_size = width * height * 3;
+
+    
+    //后续仅仅做image压缩到jpeg操作因此对于存放image的缓冲区的特性没有什么要求
+    //例如物理内存是否连续，是否支持dma,因此可以粗暴直接使用malloc分配虚拟地址连续的buffer即可
     new_node->rgb_data = (unsigned char *)malloc(rgb_size);
     if (!new_node->rgb_data) {
         free(new_node);
@@ -176,8 +208,6 @@ int service_storage_push_task(const unsigned char *rgb_data, int width, int heig
     }
 
     //拷贝drm dumb buffer中的数据，到这里的malloc分配的buffer中
-    //后续仅仅做image压缩到jpeg操作因此对于存放image的缓冲区的特性没有什么要求
-    //例如物理内存是否连续，是否支持dma
     memcpy(new_node->rgb_data, rgb_data, rgb_size);
 
     new_node->width = width;
@@ -190,7 +220,7 @@ int service_storage_push_task(const unsigned char *rgb_data, int width, int heig
     gettimeofday(&new_node->timestamp, NULL);
     new_node->next = NULL;
 
-    // 加锁入队并唤醒 Worker
+    // 加锁,插入队列尾部,并唤醒 Worker
     pthread_mutex_lock(&g_queue.lock);
     if (g_queue.tail) {
         g_queue.tail->next = new_node;
@@ -199,15 +229,22 @@ int service_storage_push_task(const unsigned char *rgb_data, int width, int heig
     }
     g_queue.tail = new_node;
     g_queue.count++;
-    pthread_cond_signal(&g_queue.cond); // 摇铃铛
+    pthread_cond_signal(&g_queue.cond);  //
     pthread_mutex_unlock(&g_queue.lock);
 
     return 0;
 }
 
+
+/**
+ * @brief 回收相应资源
+ * 
+ */
 void service_storage_deinit(void) {
     pthread_mutex_lock(&g_queue.lock);
     g_queue.stop_flag = true;
+    
+    //唤醒worker
     pthread_cond_broadcast(&g_queue.cond);
     pthread_mutex_unlock(&g_queue.lock);
 

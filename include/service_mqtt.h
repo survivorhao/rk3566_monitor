@@ -11,7 +11,7 @@ extern "C" {
 // 1. 初始化 MQTT 客户端并建立异步连接
 int mqtt_init(void);
 
-// 2. 检查当前是否在线
+// 2. 是否成功和Mqtt Broker建立连接
 bool is_mqtt_connected(void);
 
 // 3. 将抓拍图与环境数据打包并发送到云端

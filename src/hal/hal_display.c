@@ -7,16 +7,16 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <sys/select.h> // 【新增】用于阻塞等待事件
+#include <sys/select.h> 
 
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <drm_fourcc.h>
 
-// 【修改】：使用宏定义双缓冲数量
+// 使用宏定义双缓冲数量
 #define NUM_BUFFERS 2
 
-static int drm_fd = -1;
+static int drm_fd = -1;     
 static uint32_t g_crtc_id = 0; // 保存 CRTC ID 供 Page Flip 使用
 
 // 【修改】：全部改成数组
@@ -39,50 +39,97 @@ static int page_flip_pending = 0;
 static void page_flip_handler(int fd, unsigned int frame, unsigned int sec, unsigned int usec, void *data) {
     // 硬件说：翻页完成了！清除挂起标志。
     page_flip_pending = 0;
+
+    //printf("frame_id=%d, sec %u,usec %u \n",frame,sec, usec);
+    
 }
 
+
+
+
+/**
+ * @brief  初始化drm subsystem,申请两个dumb buffer
+ * 
+ * @return int 
+ */
 int hal_display_init(void) {
+
+    int i=0;
+    //直接打开drm primary结点
     drm_fd = open("/dev/dri/card0", O_RDWR);
     if (drm_fd < 0) {
         printf("[HAL Display] Error: 打开 /dev/dri/card0 失败\n");
         return -1;
     }
 
+    //获得所有的fb,crtc,connector,enconder id
     res = drmModeGetResources(drm_fd);
-    conn = drmModeGetConnector(drm_fd, res->connectors[0]);
-    g_crtc_id = res->crtcs[0];  
-    saved_crtc = drmModeGetCrtc(drm_fd, g_crtc_id);
+    
+    //多个connector的情况下，需要查找当前建立连接的connector
+    for(;i<res->count_connectors;i++)
+    {
+        conn = drmModeGetConnector(drm_fd, res->connectors[i]);
 
-    // 【修改】：循环 2 次，申请 2 块 Dumb Buffer
+        if(conn->connection==DRM_MODE_CONNECTED)
+        {
+            break;
+        }
+    }
+
+
+    //rk3566中video output processor的一个video port对应一个CRTC
+    //我们这边在设备树中仅仅enable了一个video port
+    //因此这边直接使用，理论上需要从connector找encoder,进而从encoder找CRTC
+    if(res->count_crtcs==1)
+    {
+        g_crtc_id = res->crtcs[0];  
+        saved_crtc = drmModeGetCrtc(drm_fd, g_crtc_id);
+    }
+
+
+
+    // 采用double buffer
     for (int i = 0; i < NUM_BUFFERS; i++) {
         struct drm_mode_create_dumb create = {0};
         create.width = SCREEN_WIDTH; 
         create.height = SCREEN_HEIGHT; 
-        create.bpp = 32;
+        create.bpp = 32;     //bits per pixel,每个像素需要多少bits位表示
+
+        //申请dumb buffer
         if (drmIoctl(drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &create) < 0) return -1;
         
-        gem_handle[i] = create.handle; 
-        fb_size = create.size; // 假设两次申请大小一致
+        //保存驱动返回的一些数据
+        gem_handle[i] = create.handle; //这个dumb buffer在驱动中对于的Id 
+        fb_size = create.size;         //这个dumb buffer实际的size
+        
         
         struct drm_mode_map_dumb map = {0}; 
         map.handle = gem_handle[i];
+        //为后续mmap，将这个dumb buffer映射到用户空间供cpu读写做准备
+        //这个函数会设置一个特殊的offset
         if (drmIoctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &map) < 0) return -1;
         
+        //映射到用户空间，传递这个特殊的offset，驱动找到这个特殊的Offset所对应的dumb buffer
         fb_ptr[i] = mmap(NULL, fb_size, PROT_READ | PROT_WRITE, MAP_SHARED, drm_fd, map.offset);
         memset(fb_ptr[i], 0, fb_size); 
 
-        // 注册到 DRM 获得 FB ID
+        // 注册到 DRM 获得frame buffer id,这是一个特殊的id
+        //驱动通过这个特殊的fb id可找到对应的frame buffer
         drmModeAddFB(drm_fd, SCREEN_WIDTH, SCREEN_HEIGHT, 24, 32, create.pitch, gem_handle[i], &fb_id[i]);
-        // 导出 DMA FD
+        
+        
+        //导出为一个dma fd file descriptor
         drmPrimeHandleToFD(drm_fd, gem_handle[i], DRM_CLOEXEC, &screen_dma_fd[i]);
     }
 
-    // 初始化先点亮第一块屏幕 (Front Buffer)
+    //采用double buffer,先使用第一个fb
     drmModeSetCrtc(drm_fd, g_crtc_id, fb_id[front_buf_idx], 0, 0, &conn->connector_id, 1, &conn->modes[0]);
 
     printf("[HAL Display] DRM 双缓冲 VSync 框架启动完毕！\n");
     return 0;
 }
+
+
 
 int hal_display_get_back_buffer_fd(void) {
     // 永远把后台空闲的那块画布交给 RGA
@@ -90,18 +137,21 @@ int hal_display_get_back_buffer_fd(void) {
 }
 
 void hal_display_commit_and_wait(void) {
-    // 1. 发起翻页请求：把刚才画好的 Back Buffer 提交给屏幕，要求在下一次 VSync 时翻页
+    
     page_flip_pending = 1;
+    
+    //每次在vsync事件到来时，才进行buffer的切换
+    //请求驱动在vblank事件发生之后向用户空间发送DRM_MODE_PAGE_FLIP_EVENT事件
     drmModePageFlip(drm_fd, g_crtc_id, fb_id[back_buf_idx], DRM_MODE_PAGE_FLIP_EVENT, NULL);
 
-    // 2. 配置事件监听器
+    //配置事件监听器
     drmEventContext evctx = {0};
     evctx.version = DRM_EVENT_CONTEXT_VERSION;
     evctx.page_flip_handler = page_flip_handler;
 
     fd_set fds;
     
-    // 3. 阻塞等待：Linux 线程会在这里休眠，直到硬件屏幕扫完这一帧产生中断唤醒它
+    // 调用select进行阻塞等待
     while (page_flip_pending) {
         FD_ZERO(&fds);
         FD_SET(drm_fd, &fds);
@@ -109,10 +159,12 @@ void hal_display_commit_and_wait(void) {
         int ret = select(drm_fd + 1, &fds, NULL, NULL, NULL);
         if (ret > 0) {
             if (FD_ISSET(drm_fd, &fds)) {
-                // 读取内核事件，这会触发上面的 page_flip_handler
+                
+                //处理DRM_MODE_PAGE_FLIP_EVENT事件
                 drmHandleEvent(drm_fd, &evctx); 
             }
-        } else if (ret == 0) {
+        } else if (ret == 0) 
+        {
             break; // Timeout防死锁 (实际没配超时不应该走到这里)
         }
     }
@@ -122,12 +174,22 @@ void hal_display_commit_and_wait(void) {
     back_buf_idx = 1 - back_buf_idx; 
 }
 
-// ... 下方的 alloc_buffer 和 free_buffer 保持原样 ...
-int hal_display_alloc_buffer(uint32_t width, uint32_t height, uint32_t bpp, hal_drm_buf_t* buf) {
+
+/**
+ * @brief   使用drm subsystem提供的方式，在用户空间实现高效的分配graphical buffer 
+ * 
+ * @param width 
+ * @param height 
+ * @param bpp  bits per pixel
+ * @param buf 
+ * @return int 0 on success,
+ */
+int hal_display_alloc_buffer(uint32_t width, uint32_t height, uint32_t bpp, hal_drm_buf_t* buf) 
+{
     struct drm_mode_create_dumb create = {0};
     create.width = width; 
     create.height = height; 
-    create.bpp = bpp; 
+    create.bpp = bpp; //bits per pixel,每个像素需要多少bits位表示
     if (drmIoctl(drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &create) < 0) return -1;
     
     buf->size = create.size; 
@@ -144,8 +206,13 @@ int hal_display_alloc_buffer(uint32_t width, uint32_t height, uint32_t bpp, hal_
     memset(buf->virt_addr, 0, buf->size); 
     return 0;
 }
-
-void hal_display_free_buffer(hal_drm_buf_t* buf) {
+/**
+ * @brief free graphical buffer 
+ * 
+ * @param buf 
+ */
+void hal_display_free_buffer(hal_drm_buf_t* buf) 
+{
     if (buf->dma_fd > 0) close(buf->dma_fd);
     if (buf->virt_addr && buf->virt_addr != MAP_FAILED) munmap(buf->virt_addr, buf->size);
     if (buf->handle > 0) {

@@ -14,7 +14,7 @@ typedef struct {
     int tvoc;
     float temp;
     float humi;
-    bool is_ai_active; // 主循环通过检查这个标志来决定是否跑 YOLO
+    bool is_ai_active; //是否需要激活ai进行检测
 } current_sensor_state_t;
 
 // 1. 初始化传感器模块并启动后台 epoll 监听线程

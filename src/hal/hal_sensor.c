@@ -19,8 +19,8 @@ static struct {
     int tvoc;
     float temp;
     float humi;
-    bool is_ai_active;
-    uint64_t ai_timeout_ms;
+    bool is_ai_active;       //是否需要激活ai进行检测
+    uint64_t ai_timeout_ms;  //ai检测多少秒，没有目标，后进行休眠
 } g_sensor_state = {0, 0, 0.0f, 0.0f, false, 0};
 
 static pthread_mutex_t g_state_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -45,7 +45,12 @@ int hal_sensor_get_watchdog_duration(void) {
 
 
 
-// 读取 sysfs 整数值
+/**
+ * @brief 读取DHT11数据
+ * 
+ * @param path 
+ * @return int 
+ */
 static int read_sysfs_int(const char *path) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) return 0;
@@ -55,12 +60,18 @@ static int read_sysfs_int(const char *path) {
     return atoi(buf);
 }
 
-// 核心 Epoll 监听线程
+/**
+ * @brief 传感器数据读取线程，使用epoll来实现高效监听多个传感器
+ * 
+ * @param arg NULL,unused 
+ * @return void* NULL,unused
+ */
 static void* sensor_thread_func(void* arg) 
 {
     int epfd, sr501_fd, sgp30_fd;
     struct epoll_event ev, events[MAX_EPOLL_EVENTS];
 
+    //非阻塞的方式打开设备结点
     sr501_fd = open(SR501_DEV, O_RDONLY | O_NONBLOCK);
     sgp30_fd = open(SGP30_DEV, O_RDONLY | O_NONBLOCK);
     
@@ -96,6 +107,8 @@ static void* sensor_thread_func(void* arg)
             else if (events[i].data.fd == sgp30_fd) {
                 int data[2] = {0};
                 if (read(sgp30_fd, data, sizeof(data)) == sizeof(data)) {
+                    
+                    //读取DHT11温湿度数据
                     int t_raw = read_sysfs_int(DHT11_TEMP);
                     int h_raw = read_sysfs_int(DHT11_HUMI);
                     
@@ -114,15 +127,18 @@ static void* sensor_thread_func(void* arg)
     return NULL;
 }
 
-// ===============================================
-// 对外暴露的 API
-// ===============================================
-
+/**
+ * @brief   创建单独的线程来读取DHT11,SGP30,SR501传感器数据
+ * 
+ * @return int return 0 on success
+ */
 int hal_sensor_init(void) {
     pthread_t sensor_tid;
     if (pthread_create(&sensor_tid, NULL, sensor_thread_func, NULL) != 0) {
         return -1;
     }
+
+    //设置为detached state,主线程无需手动回收资源
     pthread_detach(sensor_tid);
     return 0;
 }
@@ -135,7 +151,7 @@ current_sensor_state_t hal_sensor_get_state(void) {
     // 内部自动维护超时状态机的流转
     if (g_sensor_state.is_ai_active && now > g_sensor_state.ai_timeout_ms) {
         g_sensor_state.is_ai_active = false;
-        printf("[HAL Sensor] 💤 AI 唤醒超时 (已满10秒无动静)，进入低功耗休眠。\n");
+        printf("[HAL Sensor]  AI 唤醒超时 (已满10秒无动静)，进入低功耗休眠。\n");
     }
     
     state.co2 = g_sensor_state.co2;
