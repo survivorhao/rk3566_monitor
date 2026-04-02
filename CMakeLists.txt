@@ -32,7 +32,7 @@ add_executable(${PROJECT_NAME} ${SRC_FILES})
 target_link_libraries(${PROJECT_NAME}
     rknnrt      # RKNN NPU 核心推理库
     rga         # Rockchip 2D 图形硬件加速库
-    turbojpeg   # 静态链接的 JPEG 极速软件压缩库
+    turbojpeg   # JPEG 极速软件压缩库
     drm         # Linux 现代显示子系统接口库
     m           # 标准 C 数学库 (Math)
     pthread     # POSIX 线程库，供我们的异步多线程架构使用

@@ -23,7 +23,7 @@ static bool g_mqtt_connected = false;
  *         indicates that the disconnect is unexpected.
  */
 static void on_disconnect(struct mosquitto *mosq, void *obj, int rc) {
-    printf("[MQTT Service] 警告：与服务器的连接已断开 (原因码: %d)！等待重连...\n", rc);
+    printf("[MQTT Service] warnning: connection witch broker terminated (return code: %d)! wait reconnecting...\n", rc);
     g_mqtt_connected = false;
 }
 
@@ -52,7 +52,7 @@ void mqtt_set_cmd_callback(mqtt_cmd_cb_t cb) {
 static void on_connect(struct mosquitto *mosq, void *obj, int rc) {
     if (rc == 0) 
     {
-        printf("[MQTT Service] 成功通过 TLS 连接到 EMQX Broker!\n");
+        printf("[MQTT Service] success connect to EMQX Broker!\n");
         g_mqtt_connected = true;
 
         // 连上后立即订阅 CMD 主题 (QoS 1),实现反向控制
@@ -60,7 +60,7 @@ static void on_connect(struct mosquitto *mosq, void *obj, int rc) {
     } 
     else 
     {
-        printf("[MQTT Service] 连接失败，错误码: %d\n", rc);
+        printf("[MQTT Service] connect fail,error code: %d\n", rc);
         g_mqtt_connected = false;
     }
 }
@@ -101,7 +101,7 @@ static void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto
 
 
 /**
- * @brief 向指定的top上传数据
+ * @brief 向指定的topic上传数据
  * 
  * @param target_count 检测到几个目标（也就是检测到几个人）
  * @param temp 温度数据
@@ -119,13 +119,15 @@ int mqtt_report_event(int target_count, float temp, float humi, int co2, int tvo
 
     // 1. OpenSSL Base64 编码
     size_t b64_max_len = 4 * ((jpeg_size + 2) / 3) + 1;
+
+    // 2.分配buffer，存放base64编码后的Image data
     char *b64_buf = (char *)malloc(b64_max_len);
     if (!b64_buf) return -1;
     
     //对原始jepg图像数据进行base64编码
     int b64_len = EVP_EncodeBlock((unsigned char *)b64_buf, jpeg_buf, jpeg_size);
 
-    // 2. 组装 JSON
+    // 3. 组装 JSON
     size_t json_size = b64_len + 512; 
     char *json_buf = (char *)malloc(json_size);
     if (!json_buf) {
@@ -140,13 +142,13 @@ int mqtt_report_event(int target_count, float temp, float humi, int co2, int tvo
              "{\"timestamp\": %ld, \"target_count\": %d, \"temp\": %.1f, \"humi\": %.1f, \"co2\": %d, \"tvoc\": %d, \"image\": \"data:image/jpeg;base64,%s\"}", 
              current_time.tv_sec, target_count, temp, humi, co2, tvoc, b64_buf);
 
-    // 3. 发布消息
+    // 4. 发布消息
     int pub_ret = mosquitto_publish(mqtt_client, NULL, MQTT_TOPIC, strlen(json_buf), json_buf, 0, false);
     
     if (pub_ret == MOSQ_ERR_SUCCESS) {
-        printf(">> [MQTT Service] 已成功上报事件、传感器数据与抓拍图! (JPG: %lu bytes)\n", jpeg_size);
+        printf(">> [MQTT Service] success publish data! (JPG Image: %lu bytes)\n", jpeg_size);
     } else {
-        printf(">> [MQTT Service Error] 发送失败！错误码：%d\n", pub_ret);
+        printf(">> [MQTT Service Error] publish fail ! error code:%d\n", pub_ret);
     }
 
     free(json_buf); 
@@ -176,7 +178,7 @@ int mqtt_init(void)
     // TLS 配置
     int tls_rc = mosquitto_tls_set(mqtt_client, CA_CERT_PATH, NULL, NULL, NULL, NULL);
     if (tls_rc != MOSQ_ERR_SUCCESS) {
-        printf("[MQTT Service] TLS 证书加载失败: %s\n", mosquitto_strerror(tls_rc));
+        printf("[MQTT Service] TLS CA load fail: %s,please whether have CA file \n", mosquitto_strerror(tls_rc));
         return -1;
     }
 

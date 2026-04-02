@@ -28,7 +28,7 @@ int hal_camera_init(void) {
     //默认是blocking的方式的打开，除非显式指定O_NONBLOCK
     cam_fd = open(CAM_DEV, O_RDWR);
     if (cam_fd < 0) {
-        printf("[HAL Camera] Error: 打开摄像头设备失败\n");
+        printf("[HAL Camera] Error: open %s dev node fail, please check camera driver\n",CAM_DEV);
         return -1;
     }
 
@@ -76,7 +76,7 @@ int hal_camera_init(void) {
     enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     if (ioctl(cam_fd, VIDIOC_STREAMON, &type) < 0) return -1;
 
-    printf("[HAL Camera] 摄像头 V4L2 引擎启动成功 (DMA 直通开启)\n");
+    printf("[HAL Camera] camera v4l2 start success !\n");
     return 0;
 }
 

@@ -4,7 +4,7 @@
 #include <string.h>
 #include <sys/time.h>
 #include <signal.h> 
-#include <pthread.h> // 【新增】引入多线程
+#include <pthread.h> // 引入多线程
 
 #include "app_config.h"
 #include "service_mqtt.h"
@@ -28,35 +28,35 @@ float g_conf_threshold = 0.50f;
 bool  g_force_snapshot = false;  
 
 // ================================================================
-// 【核心新增】：AI 异步线程的共享状态与互斥锁
+// AI 异步线程的共享状态与互斥锁
 // ================================================================
 pthread_mutex_t g_ai_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t  g_ai_cond  = PTHREAD_COND_INITIALIZER;
 
 bool g_ai_thread_run = true;
-bool g_ai_busy       = false; // AI 是否正在推理
-bool g_has_new_frame = false; // 是否有新画面需要推理
-bool g_ai_wants_snap = false; // 传递给 AI 线程的强制抓拍标志
+bool g_ai_busy       = false;       // AI 是否正在推理
+bool g_has_new_frame = false;       // 是否有新画面需要推理
+bool g_ai_wants_snap = false;       // 传递给 AI 线程的强制抓拍标志
 
 // AI 计算完毕后输出的最新结果（供主线程渲染使用）
 object_detect_result_list g_display_results = {0};
-bool g_trigger_snapshot = false; // 触发主线程去抓拍落盘
-bool g_trigger_is_force = false; // 是否是强制抓拍触发
-int  g_trigger_person_count = 0;
+bool g_trigger_snapshot = false;    // 触发主线程去抓拍落盘
+bool g_trigger_is_force = false;    // 是否是强制抓拍触发
+int  g_trigger_person_count = 0;    // 检测到的人数
 
 // 传递给 AI 线程的参数结构体
 struct AI_Thread_Args {
     rknn_app_context_t* ctx;
-    image_buffer_t* img;        //要推理的图像数据
+    image_buffer_t* img;            //要推理的图像数据
 };
 
 // ================================================================
-// 【核心新增】：AI 独立推理后台线程
+// AI 独立推理后台线程
 // ================================================================
 void* ai_worker_thread(void* arg) {
     AI_Thread_Args* args = (AI_Thread_Args*)arg;
 
-    printf("[AI Worker] 后台推理引擎启动，等待画面喂入...\n");
+    printf("[AI Worker] ai inference thread running...\n");
 
     while(g_ai_thread_run) {
         // 1. 阻塞等待主线程“摇铃铛”
@@ -65,18 +65,18 @@ void* ai_worker_thread(void* arg) {
             pthread_cond_wait(&g_ai_cond, &g_ai_mutex);
         }
         g_has_new_frame = false;
-        g_ai_busy = true; // 声明自己正在忙，主线程不要再喂图了
+        g_ai_busy = true;            // 声明自己正在忙，主线程不要再喂图了
         bool is_force_snap = g_ai_wants_snap;
         g_ai_wants_snap = false;
         pthread_mutex_unlock(&g_ai_mutex);
 
         if (!g_ai_thread_run) break;
 
-        // 2. 执行耗时的 NPU 推理 (此时完全不阻塞屏幕刷新！)
+        // 2. 执行耗时的 NPU 推理
         object_detect_result_list local_results;
         inference_yolov5_model(args->ctx, args->img, &local_results);
 
-        // 3. 过滤结果
+        // 3. 过滤结果，cls_id == 0 是人，且置信度要大于云端设定的阈值
         object_detect_result_list filtered = {0};
         for(int i = 0; i < local_results.count; i++) {
             if (local_results.results[i].cls_id == 0 && local_results.results[i].prop >= g_conf_threshold) {
@@ -129,25 +129,36 @@ void cloud_cmd_handler(const char* cmd, float val) {
 
 void sig_handler(int signo) {
     if (signo == SIGINT || signo == SIGTERM) {
-        printf("\n[Main] 接收到退出信号 (Signo: %d)，准备优雅退出主循环...\n", signo);
+        printf("\n[Main] receive (Signo: %d),begin clean up resources.....\n", signo);
         g_quit_flag = 1;
     }
 }
 
 int main(int argc, char **argv)
 {
-    if (argc != 2) { printf("用法: %s <yolov5.rknn>\n", argv[0]); return -1; }
+    if (argc != 2) { printf("usage: %s <yolov5.rknn_path>\n", argv[0]); return -1; }
+
+    printf("\n =====================begin to run================== \n");
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
 
     mqtt_set_cmd_callback(cloud_cmd_handler);
 
-    if (mqtt_init() < 0) printf("[Error] MQTT 初始化失败！\n");
-    if (hal_sensor_init() < 0) printf("[Error] Sensor 初始化失败！\n");
-    if (service_storage_init() < 0) printf("[Error] Storage Worker 初始化失败！\n");
-    if (hal_display_init() < 0) return -1;
-    if (hal_camera_init() < 0) return -1;
+    if (mqtt_init() < 0) printf("[Error] MQTT init fail!\n");
+    if (hal_sensor_init() < 0) printf("[Error] Sensor init!\n");
+    if (service_storage_init() < 0) printf("[Error] Storage Worker init!\n");
+    if (hal_display_init() < 0) 
+    {
+        printf("[Error] DRM init fail\n");
+        return -1;   
+    }
+    if (hal_camera_init() < 0)
+    {
+        printf("[Error] Camera init fail\n");
+        return -1;
+    } 
+
 
     rknn_app_context_t rknn_app_ctx;
     memset(&rknn_app_ctx, 0, sizeof(rknn_app_context_t));
@@ -175,7 +186,7 @@ int main(int argc, char **argv)
     pthread_t ai_tid;
     pthread_create(&ai_tid, NULL, ai_worker_thread, &ai_args);
 
-    printf("--- 开始 AI 视觉流水线 (双线程异步 + 双缓冲防撕裂) ---\n");
+    printf("---main thread begin run---\n");
     struct timeval last_publish_time = {0}; 
 
     while (!g_quit_flag) {
@@ -253,14 +264,14 @@ int main(int argc, char **argv)
             float time_since_last_pub = (current_time.tv_sec - last_publish_time.tv_sec) + 
                                         (current_time.tv_usec - last_publish_time.tv_usec) / 1000000.0f;
 
-            //距离上次上传时间以及过了3秒，再上传，免得太过于频繁上传
+            //距离上次上传时间已经过了3秒，再上传，免得太过于频繁上传
             if (time_since_last_pub > 3.0f || is_force) {
                 if (service_storage_push_task((unsigned char*)canvas_img.virt_addr, CAM_WIDTH, CAM_HEIGHT, 
                                                 snap_count, sensor_state.temp, sensor_state.humi, 
                                                 sensor_state.co2, sensor_state.tvoc) == 0) {
                     last_publish_time = current_time; 
-                    if (is_force) printf("[Main] 强制抓拍执行完毕，图片已异步推入云端！\n");
-                    else printf("[Main] [EVENT] 画面中发现 %d 个人，已异步上云...\n", snap_count);
+                    if (is_force) printf("[Main] cloudy force snapshot finish,async publish mqtt broker...\n");
+                    else printf("[Main] [EVENT] detect %d target, async publish mqtt broker...\n", snap_count);
                 }
             } 
         }
@@ -280,7 +291,7 @@ int main(int argc, char **argv)
         hal_camera_put_frame(cam_buf_index);
     }
 
-    printf("\n--- 开始安全清理系统资源 ---\n");
+    printf("\n---begin to freee resources---\n");
     
     // 安全停止 AI 线程
     g_ai_thread_run = false;
@@ -298,6 +309,6 @@ int main(int argc, char **argv)
     hal_display_deinit();
     mqtt_cleanup();
     
-    printf("[Main] 所有资源释放完毕，终端已安全关闭。再见！\n");
+    printf("[Main] all resources have been cleaned,exit!\n");
     return 0;
 }

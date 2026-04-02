@@ -76,7 +76,7 @@ static void* sensor_thread_func(void* arg)
     sgp30_fd = open(SGP30_DEV, O_RDONLY | O_NONBLOCK);
     
     if (sr501_fd < 0 || sgp30_fd < 0) {
-        printf("[HAL Sensor] 警告：无法打开传感器节点！请检查驱动加载情况。\n");
+        printf("[HAL Sensor] error:can not open sensor dev node, please check sensor driver\n");
         return NULL;
     }
 
@@ -84,7 +84,7 @@ static void* sensor_thread_func(void* arg)
     ev.events = EPOLLIN; ev.data.fd = sr501_fd; epoll_ctl(epfd, EPOLL_CTL_ADD, sr501_fd, &ev);
     ev.events = EPOLLIN; ev.data.fd = sgp30_fd; epoll_ctl(epfd, EPOLL_CTL_ADD, sgp30_fd, &ev);
 
-    printf("[HAL Sensor] 硬件传感器事件监听引擎已启动...\n");
+    printf("[HAL Sensor] begin monitor sensor...\n");
 
     while (1) 
     {
@@ -100,7 +100,7 @@ static void* sensor_thread_func(void* arg)
                     g_sensor_state.is_ai_active = true;
                     g_sensor_state.ai_timeout_ms = get_current_time_ms() + g_watchdog_ms;
                     pthread_mutex_unlock(&g_state_mutex);
-                    printf("\n [HAL Sensor] SR501 硬件中断触发，唤醒 AI 引擎 %d 秒！\n",g_watchdog_ms);
+                    printf("\n [HAL Sensor]detect people movement,wake up ai %d second!\n",g_watchdog_ms);
                 }
             }
             // --- SGP30 1Hz 轮询触发 ---
@@ -151,7 +151,7 @@ current_sensor_state_t hal_sensor_get_state(void) {
     // 内部自动维护超时状态机的流转
     if (g_sensor_state.is_ai_active && now > g_sensor_state.ai_timeout_ms) {
         g_sensor_state.is_ai_active = false;
-        printf("[HAL Sensor]  AI 唤醒超时 (已满10秒无动静)，进入低功耗休眠。\n");
+        printf("[HAL Sensor] ai detect timeout, enter low power mode\n");
     }
     
     state.co2 = g_sensor_state.co2;

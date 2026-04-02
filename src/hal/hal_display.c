@@ -13,13 +13,13 @@
 #include <xf86drmMode.h>
 #include <drm_fourcc.h>
 
-// 使用宏定义双缓冲数量
+// frame buffer数量
 #define NUM_BUFFERS 2
 
 static int drm_fd = -1;     
 static uint32_t g_crtc_id = 0; // 保存 CRTC ID 供 Page Flip 使用
 
-// 【修改】：全部改成数组
+// 全部改成数组
 static uint32_t fb_id[NUM_BUFFERS];
 static uint32_t gem_handle[NUM_BUFFERS];
 static void* fb_ptr[NUM_BUFFERS];
@@ -30,12 +30,12 @@ static drmModeCrtc *saved_crtc = NULL;
 static drmModeConnector *conn = NULL;
 static drmModeRes *res = NULL;
 
-// 【新增】：双缓冲状态机指针
+// 双缓冲状态机指针
 static int front_buf_idx = 0;
 static int back_buf_idx = 1;
 static int page_flip_pending = 0;
 
-// 【新增】：DRM 翻页完成的硬件中断回调函数
+// DRM 翻页完成的硬件中断回调函数
 static void page_flip_handler(int fd, unsigned int frame, unsigned int sec, unsigned int usec, void *data) {
     // 硬件说：翻页完成了！清除挂起标志。
     page_flip_pending = 0;
@@ -58,7 +58,7 @@ int hal_display_init(void) {
     //直接打开drm primary结点
     drm_fd = open("/dev/dri/card0", O_RDWR);
     if (drm_fd < 0) {
-        printf("[HAL Display] Error: 打开 /dev/dri/card0 失败\n");
+        printf("[HAL Display] Error: open /dev/dri/card0 fail,please whether support drm\n");
         return -1;
     }
 
@@ -125,7 +125,7 @@ int hal_display_init(void) {
     //采用double buffer,先使用第一个fb
     drmModeSetCrtc(drm_fd, g_crtc_id, fb_id[front_buf_idx], 0, 0, &conn->connector_id, 1, &conn->modes[0]);
 
-    printf("[HAL Display] DRM 双缓冲 VSync 框架启动完毕！\n");
+    printf("[HAL Display] DRM double buffer VSync framework start success !\n");
     return 0;
 }
 

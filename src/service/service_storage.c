@@ -130,12 +130,12 @@ static void* storage_worker_thread(void* arg)
                     mqtt_report_event(task->target_count, task->temp, task->humi, 
                                       task->co2, task->tvoc, jpeg_buf, jpeg_size);
                 } else {
-                    printf("[Storage Worker] 网络离线，数据仅保存在本地 SD 卡。\n");
+                    printf("[Storage Worker] connection with broker terminated,store data to local SD card\n");
                 }
 
                 tjFree(jpeg_buf);
             } else {
-                printf("[Storage Worker Error] JPEG 压缩失败: %s\n", tjGetErrorStr());
+                printf("[Storage Worker Error] compress image to jpeg fail: %s\n", tjGetErrorStr());
             }
 
             // 5. 释放任务节点的内存（极度重要，防止内存泄漏）
@@ -161,7 +161,7 @@ int service_storage_init(void) {
     pthread_cond_init(&g_queue.cond, NULL);
 
     if (pthread_create(&g_worker_tid, NULL, storage_worker_thread, NULL) != 0) {
-        printf("创建 Storage Worker 线程失败！\n");
+        printf("create Storage Worker thread fail,please check\n");
         return -1;
     }
     return 0;
