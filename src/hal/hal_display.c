@@ -136,10 +136,25 @@ int hal_display_get_back_buffer_fd(void) {
     return screen_dma_fd[back_buf_idx];
 }
 
+#include <time.h>
+#include <stdio.h>
+#include <sys/select.h>
+
+// 获取单调递增的系统时间（精确到毫秒）
+static inline double hal_get_time_ms() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
 void hal_display_commit_and_wait(void) {
-    
     page_flip_pending = 1;
     
+    // ==========================================================
+    // 【探针起点】：记录准备呼叫 DRM 驱动的时间点
+    // ==========================================================
+    double start_time = hal_get_time_ms();
+
     //每次在vsync事件到来时，才进行buffer的切换
     //请求驱动在vblank事件发生之后向用户空间发送DRM_MODE_PAGE_FLIP_EVENT事件
     drmModePageFlip(drm_fd, g_crtc_id, fb_id[back_buf_idx], DRM_MODE_PAGE_FLIP_EVENT, NULL);
@@ -159,22 +174,36 @@ void hal_display_commit_and_wait(void) {
         int ret = select(drm_fd + 1, &fds, NULL, NULL, NULL);
         if (ret > 0) {
             if (FD_ISSET(drm_fd, &fds)) {
-                
-                //处理DRM_MODE_PAGE_FLIP_EVENT事件
+                //处理DRM_MODE_PAGE_FLIP_EVENT事件 (成功后会把 page_flip_pending 置 0)
                 drmHandleEvent(drm_fd, &evctx); 
             }
-        } else if (ret == 0) 
-        {
-            break; // Timeout防死锁 (实际没配超时不应该走到这里)
+        } else if (ret == 0) {
+            break; // Timeout防死锁 
         }
+    }
+
+    // ==========================================================
+    // 【探针终点】：成功等到 VSync 信号，唤醒出站
+    // ==========================================================
+    double end_time = hal_get_time_ms();
+    double wait_time = end_time - start_time;
+
+    // 局部静态变量，用来统计 60 帧的平均等待时间
+    static int flip_count = 0;
+    static double total_wait_time = 0;
+    flip_count++;
+    total_wait_time += wait_time;
+
+    if (flip_count == 60) {
+        printf("[Profiler] ⏳ DRM VSync Wait Avg: %.2f ms\n", total_wait_time / 60.0);
+        flip_count = 0;
+        total_wait_time = 0;
     }
 
     // 4. 翻页成功！角色互换。原来的 Back 变成了现在的 Front，原来的 Front 拿来当新的 Back。
     front_buf_idx = back_buf_idx;
     back_buf_idx = 1 - back_buf_idx; 
 }
-
-
 /**
  * @brief   使用drm subsystem提供的方式，在用户空间实现高效的分配graphical buffer 
  * 

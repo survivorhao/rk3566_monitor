@@ -1296,7 +1296,15 @@ static void draw_text_c3(unsigned char* pixels, int w, int h, const char* text, 
     const unsigned char* pen_color = (const unsigned char*)&color;
     int stride = w * 3;
 
-    unsigned char* resized_font_bitmap = (unsigned char*)malloc(fontpixelsize * fontpixelsize * 2);
+    // 优化 1：干掉 malloc！使用栈内存 (Stack Allocation)。
+    // 假设最大的字体尺寸是 32，申请一个固定大小的局部数组，速度比 malloc 快一万倍
+    unsigned char resized_font_bitmap[32 * 64]; 
+    
+    // 如果你传入的 fontsize 真的很大，可以加个保护机制
+    if (fontpixelsize > 32) return;
+
+
+    //unsigned char* resized_font_bitmap = (unsigned char*)malloc(fontpixelsize * fontpixelsize * 2);
 
     const int n = strlen(text);
 
@@ -1347,7 +1355,7 @@ static void draw_text_c3(unsigned char* pixels, int w, int h, const char* text, 
         }
     }
 
-    free(resized_font_bitmap);
+    //free(resized_font_bitmap);
 }
 
 static void draw_text_c4(unsigned char* pixels, int w, int h, const char* text, int x, int y, int fontpixelsize,

@@ -19,6 +19,15 @@
 #include "im2d.h"
 #include "RgaApi.h"
 
+#include <time.h> // 需要用到 clock_gettime
+
+// 获取单调递增的系统时间（精确到毫秒小数点后几位）
+static inline double get_current_time_ms() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
 volatile sig_atomic_t g_quit_flag = 0;
 
 // ================================================================
@@ -58,6 +67,10 @@ void* ai_worker_thread(void* arg) {
 
     printf("[AI Worker] ai inference thread running...\n");
 
+    // 【新增】：AI 线程性能探针变量
+    int ai_frame_count = 0;
+    double ai_start_time = get_current_time_ms();
+
     while(g_ai_thread_run) {
         // 1. 阻塞等待主线程“摇铃铛”
         pthread_mutex_lock(&g_ai_mutex);
@@ -96,6 +109,21 @@ void* ai_worker_thread(void* arg) {
         }
         g_ai_busy = false; // 算完了，宣布空闲
         pthread_mutex_unlock(&g_ai_mutex);
+
+        // ==========================================================
+        // 【新增打点】：每推理 10 帧打印一次 AI 性能报告
+        // ==========================================================
+        ai_frame_count++;
+        if (ai_frame_count == 10) {
+            double now = get_current_time_ms();
+            double elapsed = now - ai_start_time;
+            double fps = (10.0 / elapsed) * 1000.0;
+            
+            printf("[Profiler] 🧠 AI Inference FPS: %.2f\n", fps);
+            
+            ai_frame_count = 0;
+            ai_start_time = now;
+        }
     }
     
     printf("[AI Worker] 后台推理引擎安全退出。\n");
@@ -104,10 +132,7 @@ void* ai_worker_thread(void* arg) {
 
 /**
  * @brief 云端 MQTT 指令处理回调函数，支持动态调整 AI 参数和触发强制抓拍
- *        实现对于设备的反向控制
- * 
- * @param cmd 命令字符串，目前支持： "set_timeout", "set_threshold", "snapshot", "clear_storage"
- * @param val 命令的参数，有些命令不需要参数，直接忽略即可
+ * 实现对于设备的反向控制
  */
 void cloud_cmd_handler(const char* cmd, float val) {
     if (strcmp(cmd, "set_timeout") == 0) {
@@ -133,6 +158,30 @@ void sig_handler(int signo) {
         g_quit_flag = 1;
     }
 }
+// 使用 RGA 硬件绘制空心矩形框
+static void rga_draw_rectangle(rga_buffer_t canvas, int rx, int ry, int rw, int rh, int color, int thickness)
+{
+    // 防止越界（可选，根据你的画布边界情况）
+    if (rx < 0) rx = 0;
+    if (ry < 0) ry = 0;
+    
+    // 1. 顶部横线
+    im_rect rect_top = {rx, ry, rw, thickness};
+    imfill(canvas, rect_top, color);
+
+    // 2. 底部横线
+    im_rect rect_bottom = {rx, ry + rh - thickness, rw, thickness};
+    imfill(canvas, rect_bottom, color);
+
+    // 3. 左侧竖线 (注意高度减去上下两条横线的厚度，防止重复绘制)
+    im_rect rect_left = {rx, ry + thickness, thickness, rh - 2 * thickness};
+    imfill(canvas, rect_left, color);
+
+    // 4. 右侧竖线
+    im_rect rect_right = {rx + rw - thickness, ry + thickness, thickness, rh - 2 * thickness};
+    imfill(canvas, rect_right, color);
+}
+
 
 int main(int argc, char **argv)
 {
@@ -158,7 +207,6 @@ int main(int argc, char **argv)
         printf("[Error] Camera init fail\n");
         return -1;
     } 
-
 
     rknn_app_context_t rknn_app_ctx;
     memset(&rknn_app_ctx, 0, sizeof(rknn_app_context_t));
@@ -189,6 +237,13 @@ int main(int argc, char **argv)
     printf("---main thread begin run---\n");
     struct timeval last_publish_time = {0}; 
 
+    // ==========================================================
+    // 【新增】：主线程性能探针变量
+    // ==========================================================
+    int display_frame_count = 0;
+    double display_start_time = get_current_time_ms();
+    double total_e2e_latency = 0; // 用于计算 60 帧的平均端到端延迟
+
     while (!g_quit_flag) {
         
         int cam_dma_fd = -1;
@@ -196,6 +251,11 @@ int main(int argc, char **argv)
         
         //获得一帧，索引以及dma file descriptor
         if (hal_camera_get_frame(&cam_dma_fd, &cam_buf_index) < 0) break;
+
+        // ==========================================================
+        // 【新增打点 1】：刚刚拿到摄像头的物理帧，开始计时
+        // ==========================================================
+        double frame_start_ms = get_current_time_ms();
 
         current_sensor_state_t sensor_state = hal_sensor_get_state();
         //是否需要运行ai 推理
@@ -216,7 +276,6 @@ int main(int argc, char **argv)
             //将摄像头这一帧转换为模型所需要的格式和尺寸
             imresize(rga_cam_nv12, rga_model_rgb); // RGA 硬件瞬间完成
             
-
             //如果说client发送了强制抓拍上传的命令
             if (g_force_snapshot) {
                 g_ai_wants_snap = true;
@@ -246,16 +305,17 @@ int main(int argc, char **argv)
             int y1 = (int)(det->box.top * (CAM_HEIGHT / (float)MODEL_HEIGHT));
             int w = (int)((det->box.right - det->box.left) * (CAM_WIDTH / (float)MODEL_WIDTH));
             int h = (int)((det->box.bottom - det->box.top) * (CAM_HEIGHT / (float)MODEL_HEIGHT));
-            draw_rectangle(&canvas_img, x1, y1, w, h, 0xFF0000FF, 3); 
+            //draw_rectangle(&canvas_img, x1, y1, w, h, 0xFF0000FF, 3); 
+
+            rga_draw_rectangle(rga_canvas_rgb, x1, y1, w, h, 0xFF0000FF, 3);
 
             sprintf(text, "Person %.1f%%", det->prop * 100); 
             int text_y = (y1 - 20 < 10) ? (y1 + 10) : (y1 - 20); 
-            draw_text(&canvas_img, text, x1, text_y, 0xFFFF0000, 15); 
+            //draw_text(&canvas_img, text, x1, text_y, 0xFFFF0000, 15); 
         }
 
         // 5. 强制抓拍上传
         if (do_snap) {
-
             //检测到人了
             if (snap_count > 0) hal_sensor_keep_ai_alive(hal_sensor_get_watchdog_duration());
 
@@ -266,6 +326,7 @@ int main(int argc, char **argv)
 
             //距离上次上传时间已经过了3秒，再上传，免得太过于频繁上传
             if (time_since_last_pub > 3.0f || is_force) {
+               
                 if (service_storage_push_task((unsigned char*)canvas_img.virt_addr, CAM_WIDTH, CAM_HEIGHT, 
                                                 snap_count, sensor_state.temp, sensor_state.humi, 
                                                 sensor_state.co2, sensor_state.tvoc) == 0) {
@@ -273,6 +334,7 @@ int main(int argc, char **argv)
                     if (is_force) printf("[Main] cloudy force snapshot finish,async publish mqtt broker...\n");
                     else printf("[Main] [EVENT] detect %d target, async publish mqtt broker...\n", snap_count);
                 }
+                    
             } 
         }
 
@@ -287,8 +349,31 @@ int main(int argc, char **argv)
         //再VBLANK时提交屏幕更新请求，显示新画面
         hal_display_commit_and_wait();
 
+        // ==========================================================
+        // 【新增打点 2】：画面成功物理上屏！计算单帧端到端耗时
+        // ==========================================================
+        double frame_end_ms = get_current_time_ms();
+        total_e2e_latency += (frame_end_ms - frame_start_ms);
+
         // 7. 告诉摄像头这一帧处理完了，可以复用这个buffer了
         hal_camera_put_frame(cam_buf_index);
+
+        // ==========================================================
+        // 【新增打点 3】：每 60 帧打印一次显示性能报告
+        // ==========================================================
+        display_frame_count++;
+        if (display_frame_count == 60) {
+            double now = get_current_time_ms();
+            double elapsed = now - display_start_time;
+            double fps = (60.0 / elapsed) * 1000.0;
+            double avg_latency = total_e2e_latency / 60.0;
+            
+            printf("[Profiler] 🖥️  Display FPS: %.2f | Avg E2E Latency: %.2f ms\n", fps, avg_latency);
+            
+            display_frame_count = 0;
+            total_e2e_latency = 0;
+            display_start_time = now;
+        }
     }
 
     printf("\n---begin to freee resources---\n");

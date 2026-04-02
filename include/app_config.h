@@ -20,8 +20,8 @@
 // ==========================================
 #define SR501_DEV "/dev/sr501_dev0"
 #define SGP30_DEV "/dev/sgp30_0"
-#define DHT11_TEMP "/sys/bus/iio/devices/iio:device1/in_temp_input"
-#define DHT11_HUMI "/sys/bus/iio/devices/iio:device1/in_humidityrelative_input"
+#define DHT11_TEMP "/sys/bus/iio/devices/iio:device0/in_temp_input"
+#define DHT11_HUMI "/sys/bus/iio/devices/iio:device0/in_humidityrelative_input"
 #define MAX_EPOLL_EVENTS 5
 
 // ==========================================
