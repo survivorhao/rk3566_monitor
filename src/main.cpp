@@ -1,10 +1,20 @@
-// 文件路径: ~/smart_terminal/src/main.cpp
+
+/**
+ * @file main.cpp   
+ * @author kikyou
+ * @brief 
+ * @version 0.1
+ * @date 2026-04-03
+ * 
+ * @copyright Copyright (c) 2026
+ * 
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 #include <signal.h> 
-#include <pthread.h> // 引入多线程
+#include <pthread.h>    // 引入多线程
 
 #include "app_config.h"
 #include "service_mqtt.h"
@@ -160,6 +170,14 @@ static void rga_draw_rectangle(rga_buffer_t canvas, int rx, int ry, int rw, int 
 }
 
 
+
+/**
+ * @brief 入口
+ * 
+ * @param argc  理论上接收两个参数
+ * @param argv  argv[1]存放yolo5.rknn模型文件的路径
+ * @return int 
+ */
 int main(int argc, char **argv)
 {
     if (argc != 2) { printf("usage: %s <yolov5.rknn_path>\n", argv[0]); return -1; }
