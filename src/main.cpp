@@ -19,14 +19,7 @@
 #include "im2d.h"
 #include "RgaApi.h"
 
-#include <time.h> // 需要用到 clock_gettime
 
-// 获取单调递增的系统时间（精确到毫秒小数点后几位）
-static inline double get_current_time_ms() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
-}
 
 volatile sig_atomic_t g_quit_flag = 0;
 
@@ -67,9 +60,7 @@ void* ai_worker_thread(void* arg) {
 
     printf("[AI Worker] ai inference thread running...\n");
 
-    // 【新增】：AI 线程性能探针变量
-    int ai_frame_count = 0;
-    double ai_start_time = get_current_time_ms();
+
 
     while(g_ai_thread_run) {
         // 1. 阻塞等待主线程“摇铃铛”
@@ -110,20 +101,6 @@ void* ai_worker_thread(void* arg) {
         g_ai_busy = false; // 算完了，宣布空闲
         pthread_mutex_unlock(&g_ai_mutex);
 
-        // ==========================================================
-        // 【新增打点】：每推理 10 帧打印一次 AI 性能报告
-        // ==========================================================
-        ai_frame_count++;
-        if (ai_frame_count == 10) {
-            double now = get_current_time_ms();
-            double elapsed = now - ai_start_time;
-            double fps = (10.0 / elapsed) * 1000.0;
-            
-            printf("[Profiler] 🧠 AI Inference FPS: %.2f\n", fps);
-            
-            ai_frame_count = 0;
-            ai_start_time = now;
-        }
     }
     
     printf("[AI Worker] 后台推理引擎安全退出。\n");
@@ -161,7 +138,7 @@ void sig_handler(int signo) {
 // 使用 RGA 硬件绘制空心矩形框
 static void rga_draw_rectangle(rga_buffer_t canvas, int rx, int ry, int rw, int rh, int color, int thickness)
 {
-    // 防止越界（可选，根据你的画布边界情况）
+    // 防止越界
     if (rx < 0) rx = 0;
     if (ry < 0) ry = 0;
     
@@ -212,22 +189,26 @@ int main(int argc, char **argv)
     memset(&rknn_app_ctx, 0, sizeof(rknn_app_context_t));
     if (init_yolov5_model(argv[1], &rknn_app_ctx) != 0) return -1;
 
-    hal_drm_buf_t model_dma = {0}; 
-    hal_drm_buf_t canvas_dma = {0};
-    
+    hal_drm_buf_t model_dma = {0};      //存放模型输入Image的DMA buffer
+    hal_drm_buf_t canvas_dma = {0};     //存放CPU画框用的Canvas buffer
+    hal_drm_buf_t publish_dma = {0};    //存放要发布的图片数据的DMA buffer
+
     //分配yolov5推理输入的图片数据缓冲区
     hal_display_alloc_buffer(MODEL_WIDTH, MODEL_HEIGHT, 24, &model_dma);
     
     //分配供cpu画框用的canvas缓冲区
     hal_display_alloc_buffer(CAM_WIDTH, CAM_HEIGHT, 24, &canvas_dma);
     
+    //分配供publish用的缓冲区
+    hal_display_alloc_buffer(CAM_WIDTH, CAM_HEIGHT, 24, &publish_dma);
+    
+    //封装为rknn模型输入格式的buffer
     image_buffer_t rknn_img = {0};
-    rknn_img.width = MODEL_WIDTH; rknn_img.height = MODEL_HEIGHT; rknn_img.width_stride = MODEL_WIDTH; rknn_img.height_stride = MODEL_HEIGHT;
-    rknn_img.format = IMAGE_FORMAT_RGB888; rknn_img.virt_addr = (unsigned char*)model_dma.virt_addr; rknn_img.fd = model_dma.dma_fd;
+    rknn_img.width = MODEL_WIDTH; rknn_img.height = MODEL_HEIGHT; rknn_img.width_stride = MODEL_WIDTH; 
+    rknn_img.height_stride = MODEL_HEIGHT;
+    rknn_img.format = IMAGE_FORMAT_RGB888; rknn_img.virt_addr = (unsigned char*)model_dma.virt_addr;
+    rknn_img.fd = model_dma.dma_fd;
 
-    image_buffer_t canvas_img = {0};
-    canvas_img.width = CAM_WIDTH; canvas_img.height = CAM_HEIGHT; canvas_img.width_stride = CAM_WIDTH; canvas_img.height_stride = CAM_HEIGHT;
-    canvas_img.format = IMAGE_FORMAT_RGB888; canvas_img.virt_addr = (unsigned char*)canvas_dma.virt_addr; canvas_img.fd = canvas_dma.dma_fd;
 
     // 启动 AI 后台推理线程
     AI_Thread_Args ai_args = {&rknn_app_ctx, &rknn_img};
@@ -237,36 +218,25 @@ int main(int argc, char **argv)
     printf("---main thread begin run---\n");
     struct timeval last_publish_time = {0}; 
 
-    // ==========================================================
-    // 【新增】：主线程性能探针变量
-    // ==========================================================
-    int display_frame_count = 0;
-    double display_start_time = get_current_time_ms();
-    double total_e2e_latency = 0; // 用于计算 60 帧的平均端到端延迟
-
     while (!g_quit_flag) {
         
         int cam_dma_fd = -1;
         int cam_buf_index = -1;
         
-        //获得一帧，索引以及dma file descriptor
+        // 1.获得一帧，索引以及dma file descriptor
         if (hal_camera_get_frame(&cam_dma_fd, &cam_buf_index) < 0) break;
 
-        // ==========================================================
-        // 【新增打点 1】：刚刚拿到摄像头的物理帧，开始计时
-        // ==========================================================
-        double frame_start_ms = get_current_time_ms();
+        //封装为RGA使用的格式
+        rga_buffer_t rga_cam_nv12 = wrapbuffer_fd(cam_dma_fd, CAM_WIDTH, CAM_HEIGHT, RK_FORMAT_YCbCr_420_SP);
+        rga_buffer_t rga_canvas_rgb = wrapbuffer_fd(canvas_dma.dma_fd, CAM_WIDTH, CAM_HEIGHT, RK_FORMAT_RGB_888);
 
+        // RGA 硬件直接从摄像头的 DMA buffer拷贝并转换格式到画框用的 Canvas，零 CPU 占用
+        imcopy(rga_cam_nv12, rga_canvas_rgb); 
+        
         current_sensor_state_t sensor_state = hal_sensor_get_state();
         //是否需要运行ai 推理
         bool run_ai = sensor_state.is_ai_active || g_force_snapshot;
-
-        // 1. 获取画面拷贝到 Canvas
-        rga_buffer_t rga_cam_nv12 = wrapbuffer_fd(cam_dma_fd, CAM_WIDTH, CAM_HEIGHT, RK_FORMAT_YCbCr_420_SP);
-        rga_buffer_t rga_canvas_rgb = wrapbuffer_fd(canvas_dma.dma_fd, CAM_WIDTH, CAM_HEIGHT, RK_FORMAT_RGB_888);
-        // RGA 硬件直接从摄像头的 DMA buffer拷贝并转换格式到画框用的 Canvas，零 CPU 占用
-        imcopy(rga_cam_nv12, rga_canvas_rgb); 
-
+        
         // 2. 将画面“喂”给 AI 线程 (极速硬件缩放，零内存拷贝)
         pthread_mutex_lock(&g_ai_mutex);
         //当ai当前没在推理的时候，
@@ -297,7 +267,8 @@ int main(int argc, char **argv)
         g_trigger_snapshot = false; // 清除触发标志
         pthread_mutex_unlock(&g_ai_mutex);
 
-        // 4. 绘制画框
+        // 4. 这边仅仅绘制目标边界框，不再绘制类别名文本，由于绘制类别名需要调用软件绘制接口，
+        //性能较差，纯cpu绘制导致延迟严重，画面卡顿
         char text[256]; 
         for (int i = 0; i < draw_results.count; i++) {
             object_detect_result* det = &draw_results.results[i];
@@ -305,13 +276,9 @@ int main(int argc, char **argv)
             int y1 = (int)(det->box.top * (CAM_HEIGHT / (float)MODEL_HEIGHT));
             int w = (int)((det->box.right - det->box.left) * (CAM_WIDTH / (float)MODEL_WIDTH));
             int h = (int)((det->box.bottom - det->box.top) * (CAM_HEIGHT / (float)MODEL_HEIGHT));
-            //draw_rectangle(&canvas_img, x1, y1, w, h, 0xFF0000FF, 3); 
 
+            //这边使用硬件RGA画框，完全不占用CPU，不会受到检测框数量增多而导致延迟显著加大
             rga_draw_rectangle(rga_canvas_rgb, x1, y1, w, h, 0xFF0000FF, 3);
-
-            sprintf(text, "Person %.1f%%", det->prop * 100); 
-            int text_y = (y1 - 20 < 10) ? (y1 + 10) : (y1 - 20); 
-            //draw_text(&canvas_img, text, x1, text_y, 0xFFFF0000, 15); 
         }
 
         // 5. 强制抓拍上传
@@ -326,8 +293,13 @@ int main(int argc, char **argv)
 
             //距离上次上传时间已经过了3秒，再上传，免得太过于频繁上传
             if (time_since_last_pub > 3.0f || is_force) {
-               
-                if (service_storage_push_task((unsigned char*)canvas_img.virt_addr, CAM_WIDTH, CAM_HEIGHT, 
+                 
+                rga_buffer_t rga_publish = wrapbuffer_fd(publish_dma.dma_fd, CAM_WIDTH, CAM_HEIGHT, RK_FORMAT_RGB_888);
+                //将画框后的图像拷贝到发布用的缓冲区，准备发给mqtt线程去发布，零CPU占用  
+                imcopy(rga_canvas_rgb, rga_publish);
+                
+                    //把这张图连同环境数据一起发给存储线程，存储线程负责落盘和云端同步
+                if (service_storage_push_task((unsigned char*)publish_dma.virt_addr, CAM_WIDTH, CAM_HEIGHT, 
                                                 snap_count, sensor_state.temp, sensor_state.humi, 
                                                 sensor_state.co2, sensor_state.tvoc) == 0) {
                     last_publish_time = current_time; 
@@ -349,31 +321,10 @@ int main(int argc, char **argv)
         //再VBLANK时提交屏幕更新请求，显示新画面
         hal_display_commit_and_wait();
 
-        // ==========================================================
-        // 【新增打点 2】：画面成功物理上屏！计算单帧端到端耗时
-        // ==========================================================
-        double frame_end_ms = get_current_time_ms();
-        total_e2e_latency += (frame_end_ms - frame_start_ms);
-
         // 7. 告诉摄像头这一帧处理完了，可以复用这个buffer了
         hal_camera_put_frame(cam_buf_index);
 
-        // ==========================================================
-        // 【新增打点 3】：每 60 帧打印一次显示性能报告
-        // ==========================================================
-        display_frame_count++;
-        if (display_frame_count == 60) {
-            double now = get_current_time_ms();
-            double elapsed = now - display_start_time;
-            double fps = (60.0 / elapsed) * 1000.0;
-            double avg_latency = total_e2e_latency / 60.0;
-            
-            printf("[Profiler] 🖥️  Display FPS: %.2f | Avg E2E Latency: %.2f ms\n", fps, avg_latency);
-            
-            display_frame_count = 0;
-            total_e2e_latency = 0;
-            display_start_time = now;
-        }
+
     }
 
     printf("\n---begin to freee resources---\n");
@@ -389,6 +340,8 @@ int main(int argc, char **argv)
     service_storage_deinit(); 
     hal_display_free_buffer(&model_dma);
     hal_display_free_buffer(&canvas_dma);
+    hal_display_free_buffer(&publish_dma);
+
     release_yolov5_model(&rknn_app_ctx);
     hal_camera_deinit();
     hal_display_deinit();

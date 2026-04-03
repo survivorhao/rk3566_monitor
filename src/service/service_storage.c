@@ -14,7 +14,7 @@
 
 // 任务节点 (RGB 原图与环境快照)
 typedef struct task_node {
-    unsigned char *rgb_data;
+    const unsigned char *rgb_data;
     int width;
     int height;
     int target_count;
@@ -138,8 +138,6 @@ static void* storage_worker_thread(void* arg)
                 printf("[Storage Worker Error] compress image to jpeg fail: %s\n", tjGetErrorStr());
             }
 
-            // 5. 释放任务节点的内存（极度重要，防止内存泄漏）
-            free(task->rgb_data);
             free(task);
         }
     }
@@ -192,24 +190,12 @@ int service_storage_push_task(const unsigned char *rgb_data, int width, int heig
     }
     pthread_mutex_unlock(&g_queue.lock);
 
-    // 申请堆内存并深拷贝画面
+    // 分配一个work node
     task_node_t *new_node = (task_node_t *)malloc(sizeof(task_node_t));
     if (!new_node) return -1;
     
-    int rgb_size = width * height * 3;
 
-    
-    //后续仅仅做image压缩到jpeg操作因此对于存放image的缓冲区的特性没有什么要求
-    //例如物理内存是否连续，是否支持dma,因此可以粗暴直接使用malloc分配虚拟地址连续的buffer即可
-    new_node->rgb_data = (unsigned char *)malloc(rgb_size);
-    if (!new_node->rgb_data) {
-        free(new_node);
-        return -1;
-    }
-
-    //拷贝drm dumb buffer中的数据，到这里的malloc分配的buffer中
-    memcpy(new_node->rgb_data, rgb_data, rgb_size);
-
+    new_node->rgb_data = rgb_data;
     new_node->width = width;
     new_node->height = height;
     new_node->target_count = target_count;

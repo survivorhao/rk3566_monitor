@@ -88,6 +88,8 @@ static void* sensor_thread_func(void* arg)
 
     while (1) 
     {
+
+        //阻塞等待
         int nfds = epoll_wait(epfd, events, MAX_EPOLL_EVENTS, -1);
         if (nfds < 0) { if (errno == EINTR) continue; break; }
 
@@ -95,6 +97,8 @@ static void* sensor_thread_func(void* arg)
             // --- SR501 人体红外触发 ---
             if (events[i].data.fd == sr501_fd) {
                 char buf[4] = {0};
+
+                //读到数据，就代表检测到了人体红外线
                 if (read(sr501_fd, buf, sizeof(buf)) > 0) {
                     pthread_mutex_lock(&g_state_mutex);
                     g_sensor_state.is_ai_active = true;
@@ -105,8 +109,11 @@ static void* sensor_thread_func(void* arg)
             }
             // --- SGP30 1Hz 轮询触发 ---
             else if (events[i].data.fd == sgp30_fd) {
+                
+                //两个字节分别存放CO2 TVOC
                 int data[2] = {0};
-                if (read(sgp30_fd, data, sizeof(data)) == sizeof(data)) {
+                if (read(sgp30_fd, data, sizeof(data)) == sizeof(data)) 
+                {
                     
                     //读取DHT11温湿度数据
                     int t_raw = read_sysfs_int(DHT11_TEMP);
