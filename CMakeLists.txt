@@ -6,7 +6,7 @@ cmake_minimum_required(VERSION 3.10)
 # 在命令中设置CMAKE_TOOLCHAIN_FILE变量指向你的buildroot工具链cmake脚本
 # 无需手动设置交叉编译器gcc路径等
 # 例如 
-# cmake .. -D CMAKE_TOOCHAIN_FILE=/home/book/tspi_sdk/buildroot/output/rockchip_rk3566/host/share/buildroot/toolchainfile.cmake
+# cmake .. -D CMAKE_TOOLCHAIN_FILE=/home/book/tspi_sdk/buildroot/output/rockchip_rk3566/host/share/buildroot/toolchainfile.cmake
 
 project(smart_terminal)
 set(CMAKE_CXX_STANDARD 11)
@@ -18,6 +18,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 # ---------------------------------------------------------
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+   
     #drm.h存放在sysroot/usr/include/libdrm/目录下
     ${CMAKE_SYSROOT}/usr/include/libdrm 
 )
@@ -55,7 +56,7 @@ target_link_libraries(${PROJECT_NAME}
 # ---------------------------------------------------------
 # 5. RPATH 设置 (运行时动态库搜索路径)
 # ---------------------------------------------------------
-# -Wl传递给链接器的命令
+# -Wl传递给链接器的命令,-rpath指定运行时的搜索路径
 # 在板子上运行时，Linux 系统会自动去 /usr/lib 下找到开源库。
 # 只有 rknnrt 和 rga 是板子系统里没有的。
 # 这行代码的意思是：告诉程序，运行的时候去自己所在目录的 "lib" 文件夹下找那两个私有库。
