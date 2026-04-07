@@ -1,106 +1,153 @@
-# Smart Terminal
+# RK3566 智能感知终端工程设计报告
 
-轻量级边缘智能感知终端，基于 RK3566（RK A55 + RKNPU）。
+## 1. 项目概述
 
-核心功能
-- MIPI CSI 摄像头实时采集（OV5695）。
-- 在板载 NPU 上运行 YOLOv5 进行人体检测。
-- 多传感器融合：DHT11（温湿度，GPIO3_A3）、SGP30（CO2/TVOC，I2C）、HC-SR501（PIR，GPIO3_A4）。
-- 事件落盘：检测到人体时将图像与传感器数据写入 SD 卡并通过 MQTT（TLS）上报。
+本项目是一款基于 **Rockchip RK3566**（四核 Cortex-A55 + 1 TOPS NPU）的轻量级边缘智能感知终端。系统运行于 Linux 4.19 内核及 Buildroot 根文件系统之上，旨在实现集 AI 视觉检测、多传感器融合、边缘存储与云端同步于一体的完整解决方案。
 
-快速上手
-1. 交叉或本地构建：
+项目涵盖了从底层 Linux 字符设备驱动开发到上层多线程应用架构的完整工程链路。核心功能包括通过 MIPI CSI 摄像头实时采集图像，并实时显示在MIPI DSI屏幕，利用板载 NPU 运行 YOLOv5 模型进行人体检测，并融合温湿度 (DHT11)、气体 (SGP30) 及人体红外 (HC-SR501) 传感器数据。当检测到目标事件时，系统会自动将图像与传感器数据打包落盘，并通过 MQTT (TLS) 协议安全上报至云端。
 
-   mkdir -p build && cd build && cmake ..
-   make -j$(nproc)
+## 2. 硬件平台与外设配置
 
-2. 在目标板运行（需要 DRM 访问权限）：
+系统基于立创泰山派 RK3566 开发板构建，主要硬件外设及其连接方式如下表所示：
 
-   sudo ./build/smart_terminal <yolov5.rknn>
+| 外设类型 | 具体型号 | 接口/引脚 | 主要功能 |
+| :--- | :--- | :--- | :--- |
+| 主控芯片 | Rockchip RK3566 | SoC | 核心计算与 NPU 推理加速 |
+| 摄像头 | OV5695 | MIPI CSI | 实时视频流采集 |
+| 屏幕   | D310T9362V1 | MIPI DSI | 实时显示 |
+| 温湿度传感器 | DHT11 | GPIO  | 环境温度与湿度监测 |
+| 气体传感器 | SGP30 | I2C | CO2 与 TVOC 浓度监测 |
+| 人体红外传感器 | HC-SR501 | GPIO  | PIR 运动检测 |
 
-依赖（示例）: CMake, libdrm, libmosquitto, libssl, libturbojpeg
+## 3. 软件架构设计
 
-简要架构（高层）
-- 主线程（`src/main.cpp`）：摄像头采集、RGA 预处理、渲染与触发 AI/Storage。
-- AI 线程：后台运行 rknn 推理，结果回写共享结构，非阻塞显示路径。
-- 传感器线程（`src/hal/hal_sensor.c`）：epoll 监听 PIR/SGP30，维护传感器状态与 AI 唤醒看门狗。
-- 存储 Worker（`src/service/service_storage.c`）：工作队列 + 后台线程，负责 JPEG 压缩、SD 卡写入与 MQTT 上报。
-- MQTT（`src/service/service_mqtt.c`）：使用 libmosquitto 异步线程处理网络与命令回调。
+本项目的软件架构采用了高度解耦的多线程异步模型，确保了在资源受限的边缘设备上，视频采集、AI 推理、传感器读取与网络通信能够高效并行，互不阻塞。
 
-关键实现要点
-- DRM 双缓冲与 page-flip（见 `src/hal/hal_display.c`），保证无撕裂显示。
-- 使用 `drmPrimeHandleToFD` 导出 DMA fd，与 RGA 零拷贝协作做缩放/旋转。
-- 主/AI/Storage 三条主路径分别处理实时显示、推理与 IO，避免互相阻塞。
+### 3.1. 核心线程模型
 
-代码位置（快速导航）
-- 主程序: [src/main.cpp](src/main.cpp)
-- 显示 HAL: [src/hal/hal_display.c](src/hal/hal_display.c)
-- 摄像头 HAL: [src/hal/hal_camera.c](src/hal/hal_camera.c)
-- 传感器 HAL: [src/hal/hal_sensor.c](src/hal/hal_sensor.c)
-- Storage: [src/service/service_storage.c](src/service/service_storage.c)
-- MQTT: [src/service/service_mqtt.c](src/service/service_mqtt.c)
-- RKNPU + Yolov5: [src/rknpu/yolov5.cc](src/rknpu/yolov5.cc)
+系统在应用层主要划分为以下几个独立运行的线程：
 
-开源准备建议
-- 添加 `LICENSE`（推荐 MIT）与 `.gitignore`（忽略 `build/`）。
-- 可选：添加 `CONTRIBUTING.md` 与简单 CI（静态检查/交叉编译示例）。
+首先是**主线程** (`src/main.cpp`)，它是整个数据流的枢纽。主线程负责从 V4L2 接口获取摄像头帧，利用 RGA (Raster Graphic Acceleration) 硬件进行图像格式转换和缩放，随后将处理后的图像帧分发给 AI 线程。同时，主线程还负责将带有检测框的图像通过 DRM (Direct Rendering Manager) 提交到屏幕显示，并根据 AI 或传感器的触发信号，向存储队列提交抓拍任务。
 
-欢迎提交 issue 与 PR，需讨论重要变更请先开 issue。
+其次是 **AI 工作线程** (`ai_worker_thread`)。该线程在后台运行，通过互斥锁和条件变量等待主线程的唤醒。被唤醒后，它调用 RKNN API 在 NPU 上执行 YOLOv5 推理，对结果进行置信度过滤（默认阈值 0.50），并将最终的检测结果写回共享内存，供主线程在下一帧渲染时使用。这种设计确保了耗时的 AI 推理不会拖慢主线程的视频刷新率。
 
+第三是**传感器线程** (`sensor_thread_func`)。该线程利用 `epoll` 机制同时监听 SR501 (PIR) 和 SGP30 传感器的文件描述符。当 PIR 触发中断或 SGP30 有新数据时，线程被唤醒并更新全局环境状态。此外，该线程还维护了一个“AI 唤醒看门狗”，在检测到人体活动时激活 AI 推理，超时后则允许 AI 休眠以降低功耗。
+
+最后是**存储与网络 Worker 线程** (`storage_worker_thread`)。这是一个基于工作队列的后台线程。当主线程决定抓拍时，仅将图像指针和传感器数据压入队列。Worker 线程在后台异步调用 TurboJPEG 进行图像压缩，将图片和 CSV 记录写入 SD 卡，并通过 `libmosquitto` 提供的 MQTT 接口将事件上报至云端。
+
+### 3.2. 零拷贝与无撕裂显示机制
+
+为了在 RK3566 上实现极低的 CPU 占用和流畅的显示效果，项目在图像处理和显示链路上深度应用了硬件加速和零拷贝技术。
+
+在**图像流转**方面，首先向videobuf2申请四个存放摄像头帧数据的缓存区，并通过 `VIDIOC_EXPBUF` 导出为 DMA 文件描述符 (DMA fd)。摄像头通过 V4L2 采集到的 NV12 图像直接存放在预先分配的缓冲区中。主线程利用这些 DMA fd，直接指挥 RGA 硬件完成从 NV12 到 RGB888 的格式转换、缩放以及旋转操作。整个过程图像数据始终保留在物理内存中，CPU 无需参与像素级的拷贝。
+
+在**绘制yolov5检测结果**方面，基于`RGA`提供的函数封装了个绘制矩形目标框的函数`rga_draw_rectangle`,实现了使用`RGA`来绘制矩形目标框，而无需cpu绘制，即使在绘制多个目标的场景下，也不会导致延迟大幅度增加。
+
+在**屏幕显示**方面，`hal_display.c` 实现了一套基于 DRM 的双缓冲 (Double Buffering) 机制。系统初始化时通过 `DRM_IOCTL_MODE_CREATE_DUMB` 申请了两块 Dumb Buffer，并同样导出为 DMA fd 供 RGA 渲染。主线程在后台缓冲区 (Back Buffer) 完成绘制后，调用 `drmModePageFlip` 请求翻页，并使用 `select` 阻塞等待 VBLANK 硬件中断回调 (`page_flip_handler`)。这种严格的垂直同步机制彻底消除了画面撕裂现象。
+
+
+
+## 4. 驱动层开发细节
+
+本项目不仅包含应用层逻辑，还针对特定传感器开发了定制化的 Linux 内核驱动，以提供更高效的硬件访问接口。
+
+### 4.1. DHT11 阻塞式单总线驱动
+
+DHT11 是一款对时序要求极高的单总线传感器。在 `drivers/dht11.c` 中，考虑到 RK3566 kernel4.19 存在的中断响应延迟，驱动放弃了传统的中断驱动方式，转而采用**关闭本地 CPU 中断 (`local_irq_save`) 的阻塞式轮询**方法。
+
+在 `dht11_read_raw` 函数中，驱动首先拉低 GPIO 18-22ms 发送起始信号，随后关闭中断，通过紧凑的 `while` 循环精确测量高低电平的持续时间（约 50us 低电平，26us 或 70us 高电平）。通过比较高低电平的计数值来判定逻辑 0 或 1。读取完 40 bit 数据后立即恢复中断，并进行校验和验证。该驱动通过 Linux IIO (Industrial I/O) 子系统向用户空间暴露标准的温湿度读取接口。
+
+### 4.2. SR501 中断驱动与字符设备
+
+HC-SR501 人体红外传感器驱动 (`drivers/sr501.c`) 则采用了标准的中断与字符设备模型。在 `sr501_probe` 中，驱动将 GPIO 映射为虚拟中断号，并注册了上升沿触发的中断服务例程 (`sr501_isr`)。
+
+当检测到人体移动时，ISR 仅执行极少量的操作：将 `motion_detected` 标志置 1，并调用 `wake_up_interruptible` 唤醒等待队列。在字符设备的 `read` 操作中，若未检测到运动，进程将通过 `wait_event_interruptible` 进入休眠状态；`poll` 操作也相应地在有事件时返回 `EPOLLIN`。这种设计使得应用层的传感器线程可以通过 `epoll` 高效地挂起等待，而无需消耗 CPU 资源进行轮询。
+
+### 4.3. SGP30 I2C 驱动与延时工作队列
+
+SGP30 气体传感器驱动 (`drivers/sgp30.c`) 基于 I2C 总线实现。为了满足传感器严格的 1Hz 测量心跳要求，驱动巧妙地使用了 Linux 的延时工作队列 (`delayed_work`)。
+
+在 `probe` 阶段发送初始化命令后，驱动调度了一个周期为 1 秒的 `sgp30_measurement_work`。该工作项每次执行时，向 I2C 总线发送测量命令，等待 12ms 后读取 CO2 和 TVOC 数据，并进行 CRC-8 校验。验证通过后，更新内部状态并唤醒等待队列，随后再次调度自身。应用层同样可以通过阻塞 `read` 或 `poll` 机制，稳定地以 1Hz 的频率获取最新的空气质量数据。
+
+## 5. 云端反向控制与 MQTT 集成
+
+系统不仅能够上报数据，还支持通过 MQTT 接收云端的反向控制指令。在 `src/service/service_mqtt.c` 中，基于 `libmosquitto` 建立的异步网络线程订阅了特定的命令主题。
+
+当收到云端下发的 JSON 指令时，系统通过轻量级的字符串解析提取命令和参数，并触发回调函数 `cloud_cmd_handler`。目前支持的动态控制功能包括：
+*   `set_timeout`：动态调整检测到人体后 AI 保持唤醒的看门狗时长。
+*   `set_threshold`：实时修改 YOLOv5 目标检测的置信度阈值。
+*   `snapshot`：无视传感器状态，强制触发一次图像抓拍和数据上报。
+*   `clear_storage`：远程清理设备 SD 卡上的历史图片和 CSV 记录，释放存储空间。
+
+
+
+
+## 6. 实际运行参数测量
+
+### 6.1一些固定参数
+
+- ov5695采集帧率30 fps
+- vop刷新率60hz,因此vblank周期16.6ms
+
+
+### 6.2 使用npu进行一次yolov5（int8量化）推理的时间（输入image size 640 640 rgb888）
+
+- 67ms左右，也就是15hz左右，基本上是稳定的，不会说你当前Image中实际包含的人数多就导致推理时间变长
+
+
+### 6.3 软件处理流水线的延迟
+
+从videobuf2取出一个帧缓冲区后->使用RGA转换size以及color format->使用RGA画推测目标框(检测到目标的情况下)
+->递交给storage线程->改变CRTC的fb以及等待Vblank事件的时间
+
+上述流程的总时间：
+
+- a.实际测试在有8个目标测试的情况下，软件处理流水线的延迟在29-35ms之间波动
+
+- b.而在没有目标的情况下（不需要RGA画框以及做一些判断），软件处理流水线延迟在12-20 ms
+
+> 我这边并没有考虑从viddeobuf2等待取出一帧的所需要的时间，因为这个时间在摄像头采集30fps的情况下，最长也就是33ms
+> 我这边不考虑的主要原因是：最长时间实际上你纯等待获取摄像头一帧的最长时间（这里的“纯”的意思是你不进行任何其他的操作）
+> 实际在我这里，我取出一帧数据之后，后面进行了一系列的操作，实际上只有当你软件处理流水线的时间小于33ms的时候，此时你等待从
+> videobuf2获取一帧的时间就稍微长，但是总时间还是会在33ms左右；当你软件处理流水线的时间大于33ms的时候，此时你等待从videobuf2
+> 获取一帧的时间趋近于0，因为我这边申请了四个video buffer,此时已经有一个video buffer存放好了摄像头采集的数据，可以直接取出！
+
+波动的主要原因在于等待Vblank事件的事件不固定，0-16.6ms，因为为了确保无撕裂显示，我仅仅在Vblank事件的时候改变VOP扫描的帧缓冲区
+
+### 6.4 CPU占用
+实际的总共CPU占用：
+
+- 纯实时显示（摄像头采集 + 实时显示）：单核的50%-55%
+- 满血运行（摄像头采集 + 实时显示 + NPU 目标检测 + 画框 + 保存到本地+上云）：1个核心左右
+
+> 实际上这并不指的是我这里应用程序的单独CPU占用，而是整个系统的CPU占用，尤其是ISP用户空间的守护进程进行rkaiq_3A_server的CPU占用也较高
+
+### 6.5 内存占用
+
+- 应用程序实际占用46Mbyte物理内存
+- rkaiq_3A_server实际占用13Mbyte
 ---
 
-## 详细架构说明
 
-本项目目标是在立创泰山派 RK3566 开发板上（Buildroot 根文件系统、Linux 4.19）构建一个集成 AI 视觉检测、多传感器融合、边缘存储与云同步的智能感知终端。下面针对各模块与运行时线程、数据流做具体说明，便于阅读代码与二次开发。
+## 7.`/asset`目录下包含一些实际运行的图片
 
-- 硬件平台
-	- 主控：Rockchip RK3566（四核 Cortex-A55 + 1 TOPS NPU）
-	- 摄像头：OV5695（MIPI CSI）
-	- 温湿度：DHT11（GPIO: GPIO3_A3）
-	- 气体传感器：SGP30（I2C）
-	- 人体红外：HC-SR501（GPIO: GPIO3_A4）
+## 8. 如何放到我的板子上运行呢？
 
-- 功能概述
-	1. 通过 MIPI CSI 摄像头实时采集画面。
-	2. 在 NPU 上运行 YOLOv5 模型进行人体检测（rknn 接口）。
-	3. 采集温湿度、CO2/TVOC、PIR 信号；当检测到人体事件时，将图像帧与传感器数据打包保存到 SD 卡，并通过 MQTT（TLS）上报到云端。
+请把`/board_app`目录下的所有内容，放到你的板子下,然后切换到指定目录
 
-- 主要线程与运行时组件
-	- 主线程（`src/main.cpp`）: 负责摄像头帧循环、使用 RGA 做图像预处理/缩放/旋转、调用 HAL 接口与发送给 AI 线程；同时与显示层（DRM）交互完成双缓冲提交。
-	- AI 工作线程（`ai_worker_thread`，在 `src/main.cpp`）: 后台运行，等待主线程通过条件变量唤醒；调用 `inference_yolov5_model()` 在 RKNPU 上执行推理、过滤结果并将检测结果回写到共享变量供主线程渲染与触发抓拍。
-	- 传感器线程（`sensor_thread_func`，在 `src/hal/hal_sensor.c`）: 使用 epoll 监听 SR501（PIR 中断）与 SGP30（周期性数据），并通过共享状态（加锁）向主线程提供最新环境数据与 AI 唤醒信号。
-	- 存储 Worker（`storage_worker_thread`，在 `src/service/service_storage.c`）: 独立线程实现 work-queue，负责 JPEG 压缩（TurboJPEG）、本地落盘（图片 + CSV 记录）与通过 MQTT 上报。主线程仅向队列提交任务以降低实时路径开销。
-	- MQTT 网络线程（由 libmosquitto 内部创建，见 `src/service/service_mqtt.c`）: 异步维护与 Broker 的连接、接收云端下发指令并回调主程序（例如修改置信度、强制抓拍、清理存储）。
+然后执行
+```bash
 
-- 关键同步与缓冲机制
-	- DRM 双缓冲（`src/hal/hal_display.c`）: 使用两个 dumb buffer，当前 front/back 通过 `drmModePageFlip()` 与 page-flip 事件完成无撕裂切换； `hal_display_commit_and_wait()` 会等待 page-flip 完成后交换索引。
-	- RGA 零拷贝：使用 `drmPrimeHandleToFD` 导出 dma fd，RGA 以 fd 作为输入/输出进行硬件拷贝/缩放/旋转，减少 CPU 内存拷贝。
-	- AI 线程通信：主线程与 AI 线程通过 `pthread_mutex_t` + `pthread_cond_t` 协同，主线程喂入一帧并 `pthread_cond_signal()` 唤醒 AI，AI 完成后更新共享结果并设置触发抓拍标志。
-	- 存储队列：`service_storage_push_task()` 将任务放入链表队列并用条件变量唤醒 Storage Worker，Worker 在后台异步压缩与上传，防止主循环阻塞。
+# ./smart_terminal程序接收一个参数，指定yolov5.rknn文件的路径
+./smart_terminal ./model/yolov5.rknn
 
-- 数据流（从采集到上报）
-	1. 摄像头（V4L2/MIPI）采集 NV12 帧。
-	2. 主线程用 RGA 将 NV12 快速转换为展示用 RGB canvas（零拷贝），并用 RGA 将缩放后的 RGB 数据准备给模型输入缓冲（`MODEL_WIDTH`/`MODEL_HEIGHT`）。
-	3. 主线程通过条件变量通知 AI 工作线程进行推理，AI 在 NPU 完成后写回检测结果。
-	4. 若检测到目标或传感器触发（PIR），主线程把当前 canvas 的 RGB 数据深拷贝并调用 `service_storage_push_task()`，由 Storage Worker 完成 JPEG 压缩、本地写盘与 MQTT 上报。
+```
+rknpu目录下文件讲解
+- smart_terminal    实际编译好的应用程序
+- yolov5.rknn       使用int8量化好的可以直接运行的yolov5
+- lib               存放应用程序运行所需要的动态链接库，rknnrt以及rga
+- emqxsl-ca.crt     CA文件用于验证MQTT broker证书
 
-传感器数据 -> `hal_sensor` 的 epoll 线程更新内部状态；当 PIR 触发或 AI 检测到人时，传感器值与帧一起保存并上报。
-
-## 与 Buildroot / 内核的集成注意点
-
-- 需要在 Buildroot 配置中启用对应的摄像头驱动（V4L2 / MIPI CSI）、RK 平台的 DRM 驱动与 RGA 驱动，以及 I2C、GPIO 接口驱动（用于 DHT11/HC-SR501/SGP30）。
-- 确保内核启用了 `drm`、`drm_kms_helper`、`drm/rockchip` 与 `v4l2` 相关选项（kernel v4.19 在 RK3566 常见）。
-- 将 CA 证书与 Mosquitto TLS 配置部署到设备，以便 `service_mqtt` 使用 TLS 安全连接云端 Broker。
-
-## 位置与文件参考
-
-- 主程序: [src/main.cpp](src/main.cpp)
-- 显示 HAL: [src/hal/hal_display.c](src/hal/hal_display.c)
-- 摄像头 HAL: [src/hal/hal_camera.c](src/hal/hal_camera.c)
-- 传感器 HAL: [src/hal/hal_sensor.c](src/hal/hal_sensor.c)
-- Storage: [src/service/service_storage.c](src/service/service_storage.c)
-- MQTT: [src/service/service_mqtt.c](src/service/service_mqtt.c)
-- RKNPU + Yolov5: [src/rknpu/yolov5.cc](src/rknpu/yolov5.cc)
 
 
 

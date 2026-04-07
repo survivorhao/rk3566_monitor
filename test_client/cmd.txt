@@ -1,0 +1,18 @@
+{
+	"cmd":"set_timeout",
+	"val": 30
+
+}
+
+{
+	"cmd":"set_threshold",
+	"val": 0.85
+}
+
+{
+	"cmd": "snapshot"
+}
+
+{
+	"cmd": "clear_storage"
+}
