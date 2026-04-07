@@ -57,7 +57,7 @@ target_link_libraries(${PROJECT_NAME}
 # 5. RPATH 设置 (运行时动态库搜索路径)
 # ---------------------------------------------------------
 # -Wl传递给链接器的命令,-rpath指定运行时的搜索路径
-# 在板子上运行时，Linux 系统会自动去 /usr/lib 下找到开源库。
-# 只有 rknnrt 和 rga 是板子系统里没有的。
-# 这行代码的意思是：告诉程序，运行的时候去自己所在目录的 "lib" 文件夹下找那两个私有库。
+# 在板子上运行时，Linux 系统会自动去elf所在目录的lib子目录下找
+# 因为 rknnrt 和 rga 是板子的根文件系统中没有包含的库
+# 这里的 $ORIGIN 变量会由动态链接器替换为 ELF文件所在的路径
 set_target_properties(${PROJECT_NAME} PROPERTIES LINK_FLAGS "-Wl,-rpath=$ORIGIN/lib")
